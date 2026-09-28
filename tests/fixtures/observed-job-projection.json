@@ -1,0 +1,36 @@
+{
+  "internal_sequence": 8,
+  "submission_state": "ACCEPTED",
+  "request": {
+    "event_id": "pyfinder-verification-global-20260926-r1_t00000",
+    "configuration": "global"
+  },
+  "acknowledgement": {
+    "event_id": "pyfinder-verification-global-20260926-r1_t00000",
+    "internal_sequence": 8
+  },
+  "observation": {
+    "scope": "jobs",
+    "details": {
+      "internal_sequence": 8,
+      "job_completed": true,
+      "products_ready": true,
+      "status": "SUCCESS",
+      "configuration": {
+        "selected": "global"
+      },
+      "native_outcome": {
+        "exit_code": 0,
+        "signal": null,
+        "started": true
+      },
+      "shared_paths": {
+        "product_manifest": null,
+        "products": null,
+        "provenance": null,
+        "service_log": null,
+        "shake_log": null
+      }
+    }
+  }
+}

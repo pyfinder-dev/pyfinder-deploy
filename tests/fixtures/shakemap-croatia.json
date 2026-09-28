@@ -1,0 +1,29 @@
+{
+  "synthetic": true,
+  "configuration": "croatia",
+  "origin_time": "2026-09-26T12:30:15.250000Z",
+  "latitude": 45.8,
+  "longitude": 15.9,
+  "depth_km": 6.0,
+  "magnitude": 5.5,
+  "stations": [
+    {
+      "network": "XX",
+      "station": "S01",
+      "location": "00",
+      "channel": "HNE",
+      "latitude": 45.77,
+      "longitude": 15.92,
+      "pga_cm_s2": 98.0665
+    },
+    {
+      "network": "XX",
+      "station": "S01",
+      "location": "00",
+      "channel": "HNN",
+      "latitude": 45.77,
+      "longitude": 15.92,
+      "pga_cm_s2": 98.0665
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+# Operator-owned data and machine-local settings never belong in Git.
+/runtime/
+/deployment.env
+/.agent/agent-exchange.md
+__pycache__/
+*.pyc
