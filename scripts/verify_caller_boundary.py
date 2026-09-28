@@ -349,7 +349,7 @@ def main():
         parser.error("--expect-native requires --calculation-fixture")
     expected_environment = deployment.ROOT.parent / ".venv"
     if Path(sys.prefix).resolve() != expected_environment.resolve():
-        parser.error("Activate the existing pyfinder-dev/.venv; do not use system Python")
+        parser.error("Activate the existing .venv in the parent of this checkout; do not use system Python")
     try:
         fixture = None if arguments.calculation_fixture is None else json.loads(arguments.calculation_fixture.read_text())
         verify(deployment.load_settings(arguments.config), arguments.evidence,

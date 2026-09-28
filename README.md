@@ -1,354 +1,251 @@
 # PyFinder deployment
 
-This repository connects the PyFinder application and separate ShakeMap service
-on one host. Component repositories own their images, scientific behavior and
-service helpers. These scripts configure and delegate those helpers; they do not
-replace either workflow or install the legacy combined `pyfinder-docker` image.
+This repository operates PyFinder and the separate ShakeMap service on one host.
+PyFinder receives earthquake alerts, schedules FinDer calculations and submits
+prepared inputs to ShakeMap. ShakeMap owns native calculations and their products.
+Deployment helpers configure and invoke the component helpers; the Makefile is a
+set of thin aliases.
 
-This is an initial deployment foundation. It does not establish complete workflow
-readiness: broader regional verification, reproducible regional provisioning,
-exact-calculation product retention, uncertain-submission recovery and notifications
-still need separate work. The complete scheduled production chain has not been
-verified by the finite checks.
+## Prerequisites and layout
 
-## Prepare local settings
+Provide Docker, Bash, Make and a project Python environment using Python 3.12 or
+newer, with the component host dependencies installed. This is PyFinder's minimum;
+the standalone ShakeMap service package permits Python 3.10, which is insufficient
+for the combined project checks. The helpers do not install these prerequisites,
+clone repositories or create a virtual environment. Image builds and data
+provisioning require access to their upstream sources; do not bypass TLS or
+checksum failures.
 
-Use the existing project environment for every host command:
+Use sibling checkouts with the following layout. Commands below run from
+`pyfinder-deploy` after activating the existing parent environment.
 
-```sh
-source /Users/savas/my-codes/eew/pyfinder-dev/.venv/bin/activate
-cd /Users/savas/my-codes/eew/pyfinder-dev/pyfinder-deploy
-make setup
+```text
+workspace/
+├── .venv/
+├── pyfinder/
+├── shakemap-docker/
+└── pyfinder-deploy/
+    ├── deployment.env
+    └── runtime/
+        ├── pyfinder/
+        └── shakemap/
 ```
 
-Setup preserves an existing `deployment.env` and all existing runtime contents.
-It creates only missing PyFinder directories and copies the example settings when
-no local file exists. It does not change ownership, install packages, download
-data, build images, migrate files or start containers. Review `deployment.env`.
-Use literal `KEY=value` lines: no quotes, `export`, substitutions or inline
-comments. Spaces inside paths are supported. Local settings, runtime contents and
-the operational exchange file are ignored by Git; durable `.agent` files are not.
+Install the ShakeMap host package in that environment so its `shake-in-docker`
+command is available to the service helpers:
+
+```sh
+# From pyfinder-deploy, use the existing project environment.
+source ../.venv/bin/activate
+python -m pip install -e ../shakemap-docker
+```
+
+This installs the host REST client and helper dependencies, not the native FinDer
+executable. FinDer runs only inside its required container image.
+
+The canonical images are `pyfinder:dev` and `shakemap-docker:latest`; their container
+names are `pyfinder-docker` and `shakemap-docker`. PyFinder retains the required
+FinDer base image, `ghcr.io/sceylan/finder-base:gmt5`. The legacy combined container
+repository is not part of this installation.
+
+## Configure the deployment
+
+```sh
+# From the deployment checkout, activate the already provisioned environment.
+source ../.venv/bin/activate
+
+# Create missing caller directories and copy the settings template if absent.
+make setup
+
+# Print resolved paths to copy into the three required host-path settings.
+(cd ../pyfinder && pwd -P)
+(cd ../shakemap-docker && pwd -P)
+(cd runtime && pwd -P)
+```
+
+Edit `deployment.env` before other operations. Setup preserves an existing file
+and runtime contents. The [example](deployment.env.example) deliberately leaves
+required host paths and the caller endpoint blank; it is a template, not a working
+deployment configuration. Fill `PYFINDER_REPOSITORY`, `SHAKEMAP_REPOSITORY` and
+`SHAKEMAP_RUNTIME_ROOT` with the resolved absolute paths printed above. The runtime
+must be this deployment checkout's `runtime` directory.
+
+Settings are literal `KEY=value` lines. Do not use quotes, `export`, inline comments,
+`~`, `$HOME`, `$PWD` or shell substitutions: the parser does not expand them. Paths
+may contain spaces. Unknown, duplicate and missing required settings are rejected.
+
+Set `PYFINDER_SHAKEMAP_URL` to an HTTP(S) endpoint reachable **from the caller
+container**. Docker Desktop commonly provides `host.docker.internal`; other Docker
+hosts need an explicitly configured route. These helpers do not add a host-gateway
+mapping or infer container connectivity from a successful host request. Keep
+`PYFINDER_SHAKEMAP_ENABLED=false` until verification is complete.
+
+The selected configuration defaults to `global`. The service always executes the
+explicit selection and never infers a region or substitutes another profile.
+PyFinder can retain a confirmed regional configuration failure and submit once
+more explicitly with `global`, using the same public calculation ID and a new
+native sequence. Uncertain acceptance, read failures and unrelated native failures
+do not authorize that recovery. Both attempts remain visible in retained evidence
+and diagnostics. See the [adapter guide](../pyfinder/docs/shakemap-adapter.md).
+
+`PYFINDER_SHAKEMAP_OVERWRITE=true` replaces the preceding calculation's complete
+service and product trees when its public ID is reused; `false` archives both
+before recalculation. Neither option updates an old result file by file.
 
 Optional `PYFINDER_ALERT_CONFIG` selects the existing separate email configuration
-file by its container path under `/home/sysop/runtime/pyfinder`. Deployment
-validates that it maps to an existing regular file in the current parent bind;
-it does not read credentials or add a mount. Empty explicitly disables email;
-omitting the key preserves PyFinder's legacy file discovery. The example disables
-email. Keep secrets and recipients in the separate file, never `deployment.env`.
-The wrapper ignores an ambient shell override, so local settings remain decisive.
+by its container path under `/home/sysop/runtime/pyfinder`. The mapped file must
+exist without symlinks. Empty disables email; omitting the key preserves PyFinder's
+legacy configuration discovery. The example disables email. Keep credentials and
+recipient lists in the separate file, never in `deployment.env`. See
+[PyFinder notification configuration](../pyfinder/README.md).
 
-The approved runtime is this repository's
-`/Users/savas/my-codes/eew/pyfinder-dev/pyfinder-deploy/runtime`. PyFinder owns
-`runtime/pyfinder`; ShakeMap owns `runtime/shakemap`. The example sets this common
-parent explicitly and keeps caller integration disabled. Setup only prepares
-missing caller directories/settings; migration and container verification are
-separate operations.
+## Build, prepare data and start
 
-## Current deployment state
+```sh
+# Build the two canonical images from the configured component checkouts.
+make build COMPONENT=pyfinder
+make build COMPONENT=shakemap
 
-On 2026-09-26, the former development runtime was consolidated at
-`/Users/savas/my-codes/eew/pyfinder-dev/pyfinder-deploy/runtime`. Existing PyFinder
-files were preserved, as were ShakeMap datasets, calculations, archives and the
-historical `install-dtgeo` payload. The old source-repository runtime was removed
-after verification; no second empty runtime was substituted.
+# Inspect existing global assets before explicitly provisioning missing data.
+make data COMPONENT=shakemap DATA_ACTION=inspect
+make data COMPONENT=shakemap DATA_ACTION=provision
+make data COMPONENT=shakemap DATA_ACTION=validate
 
-Canonical ShakeMap is running and reports ready with version 4.4.9 and its
-unchanged image. Its parent bind uses the consolidated root, with the existing
-read-only global/regional/test data overlays. Retained current sequences 3, 4 and
-7 and archived sequence 6 remain accessible with products ready. The migration
-did not execute another scientific calculation or establish regional readiness.
+# Prepare and verify the service; this can recreate its canonical container
+# and run native verification calculations.
+make finalize COMPONENT=shakemap
 
-Four operational status records had their six shared-path fields rebased to the
-new host root, with original records backed up. Scientific files and historical
-provenance retain their original content; older paths inside historical evidence
-identify where those calculations were made and are not active deployment settings.
-Protected evidence is retained at
-`/private/tmp/pyfinder-runtime-migration-20260926`; begin with `summary.json` rather
-than distributing raw Docker inspection files, which can contain environment data.
+# Start an already finalized, compatible service when it is stopped.
+make start COMPONENT=shakemap
 
-PyFinder was rebuilt and verified on 2026-09-26. Image `sha256:3e55e5d552f0...`
-uses Python 3.12.13 and recorded ParamWS commit
-`3ddb2aaf08a798465d415f37828ad2dfce155043`. Isolated image checks passed, followed
-by the finite installed-caller probe: all 13 selected module hashes matched the
-current checkout, package origins were installed site-packages, and UID/GID 1000:1000
-verified two-way shared-input access and REST connectivity to ready ShakeMap 4.4.9.
-The selected `global` configuration was listed; this did not run a native job.
-Exact image/provenance and probe results are in
-`/private/tmp/pyfinder-caller-boundary-20260926/summary.json`.
+# Inspect service state before the separate verification steps below.
+make status
+```
 
-The transient caller and its markers were removed after verification. Canonical
-`pyfinder-docker` is currently absent, local integration remains false, and all
-1,574 preexisting PyFinder runtime files were preserved. No listener, provider,
-operational database, FinDer or SMTP workflow was run. The service queue remained
-empty. Production activation still requires a separate reviewed step.
+The deployment data helper manages the pinned global VS30 and topography assets.
+`inspect` reads presence/readability, `validate` verifies identities without writing,
+`provision` installs missing assets, and `stage` validates replacements without
+activating them. For manual imports, additional assets and regional prerequisites,
+use the [service data and configuration guide](../shakemap-docker/docs/configuration.md).
+Direct component commands must receive this deployment runtime explicitly:
+`--runtime` for the data helper and `--runtime-root` for service lifecycle helpers.
+Their defaults otherwise refer to the component checkout's own runtime.
 
+Finalization is a mutating operation. It may create or replace the canonical
+service container and publish readiness only after its verification succeeds.
+Failure can revoke readiness and stop the service. Ordinary setup and startup do
+not migrate runtime data or silently replace incompatible containers. Resolve
+reported image, environment or mount conflicts deliberately while preserving
+mounted data.
 
-Fresh synthetic calculations subsequently ran from that installed caller image
-on 2026-09-26. These outcomes apply to the explicit point fixtures and the runtime
-profiles/data used for this pass:
+## Shared storage and ownership
 
-| Configuration | Sequence | Native outcome and verification | Saved evidence |
-| --- | --- | --- | --- |
-| global | 8 | SUCCESS; corrected validator passed GET-only revalidation with runtime mounted read-only | `/private/tmp/pyfinder-native-global-20260926-r1-revalidation/summary.json` |
-| belgium | 9 | Expected FAILED; legacy VS30 path and missing-layer diagnostics retained, no fallback | `/private/tmp/pyfinder-native-belgium-20260926-r1/summary.json` |
-| france | 10 | SUCCESS; full product/profile evidence passed | `/private/tmp/pyfinder-native-france-20260926-r1/summary.json` |
-| croatia | 11 | SUCCESS; full product/profile evidence passed | `/private/tmp/pyfinder-native-croatia-20260926-r1/summary.json` |
-| slovenia | 12 | SUCCESS; full product/profile evidence passed | `/private/tmp/pyfinder-native-slovenia-20260926-r1/summary.json` |
+Both containers bind the same host `runtime` parent to `/home/sysop/runtime`.
+The caller prepares inputs at `/home/sysop/runtime/shakemap/data/inputs`; there is
+no additional input bind. UID/GID `1000:1000` must have actual access to the required
+writable paths. Setup does not recursively change ownership or permissions.
 
-All four successful calculations passed validation of 27 products, required core
-products, hashes/sizes, logs, provenance and 11 profile-file identities. The first
-global run exposed a verifier schema error after native SUCCESS: detailed job
-rows intentionally omit the enclosing event ID. Its original harness failure is
-preserved at `/private/tmp/pyfinder-native-global-20260926-r1/summary.json`.
-The corrected validator checked the existing sequence; global was not resubmitted.
-Belgium's expected-failure assertion passed, which is evidence of visible failure
-without fallback, not Belgian readiness.
+PyFinder owns `runtime/pyfinder`, including its state, logs, runs and playback
+workspaces. ShakeMap owns `runtime/shakemap`, including data, native products and
+internal service records. The shared parent exposes both trees to both containers;
+application ownership is not filesystem isolation. ShakeMap's global, regional and
+test dataset overlays are read-only in the service container. They do not make the
+caller's view read-only or authorize it to modify service datasets.
 
-Only the Croatia, France and Slovenia runtime profiles received the bounded
-corrections in this pass: 21 mechanical configuration-key changes and 21
-byte-preserved layer copies. The exact INGV-linked regional grid was imported;
-its observed identity is 611,360,031 bytes, SHA-256
-`5eb72b040ac1c3a10ec4333b8eeb1b0234637219496d82bf6368d47cf0c1ab3a`.
-A publisher checksum, grid version and license were not verified from that link.
-This observed transfer identity does not prove equality with a formerly missing
-original asset. Correction/backups and semantic differences are recorded under
-`/private/tmp/pyfinder-regional-correction-ts0jiilh`.
+## Verify before continuous operation
 
-The fixture helper verifies regional profile bytes and records the selected data
-paths. Separate read-only postchecks found the expected effective VS30 filename
-in each successful native `shake_result.hdf` and confirmed the regional grid still
-matched its pre-import observed identity; global topography matched its managed
-manifest. The HDF configuration did not contain the topography setting. Evidence
-is in `/private/tmp/pyfinder-native-matrix-20260926-r1/`:
-`native-hdf-effective-configuration.json` and `postrun-asset-identities.json`.
-These checks are not a hidden per-calculation validation feature. One successful
-point does not validate every regional branch, coverage or scientific accuracy. Albania, Belgium, Greece, Italy, Romania and Switzerland still lack a
-successful current-profile verification and have unresolved configuration/assets.
-These regional corrections currently live in ignored operator runtime settings;
-repeatable, versioned regional provisioning remains development work. A fresh
-checkout alone cannot reproduce this operator state.
+Keep host tests, installed-image checks and running-service checks separate.
+Container state, a healthy service and a listed configuration each answer different
+questions. Configuration listing alone does not validate its scientific modules,
+datasets, coverage or native execution.
 
-Final cleanup and preservation checks are recorded in
-`/private/tmp/pyfinder-native-matrix-20260926-r1/summary.json`: the caller is absent,
-probe markers are gone, integration remains false, the same ShakeMap container is
-ready with an empty queue, and all 1,574 preexisting caller files plus 749 older
-service-calculation files are unchanged. Only the new owned fixture workspaces and
-service results were added. No PyFinder provider acquisition, FinDer, SMTP or
-production listener ran. Native STREC attempted online tensor lookup for the
-synthetic event IDs; these native runs must not be described as having zero outbound
-network activity.
+Keep caller integration disabled and the canonical caller name absent while
+running the installed-image check, then the finite caller probe. Complete any
+required native fixture checks before proceeding to continuous activation below.
+`make verify` inspects existing containers and therefore belongs after both have
+been created; it does not replace these pre-activation checks.
 
-## Configure the shared boundary
-
-`SHAKEMAP_RUNTIME_ROOT` must equal the approved common parent. External runtime
-roots are refused before component commands run. Both supported container
-configurations bind that same host parent to `/home/sysop/runtime`, so the caller setting
-`/home/sysop/runtime/shakemap/data/inputs` reaches the service's canonical inputs.
-There is no additional input bind or launcher-only input-source setting.
-
-The full parent mount makes both component trees visible to both containers.
-This is shared storage with application ownership, not filesystem access isolation:
-PyFinder writes its own subtree and prepares its agreed event inputs; ShakeMap
-owns its calculation products, records and data handling. The service's existing
-read-only global/regional/test data overlays protect its view, not the caller's
-view. Do not interpret visibility as permission to modify another component's
-files. Retained historical payloads such as `install-dtgeo` are not automatically
-activated or selected as scientific data.
-
-Existing containers are never removed or recreated by these wrappers. Their image,
-settings or mounts may need deliberate replacement while preserving mounted data.
-The rebuilt caller image passed installed-code and bounded connectivity checks;
-these checks must be repeated when relevant code, image or deployment settings
-change. The previous caller image ID became unresolvable after tag replacement;
-retained old inspection and container-only GMT files are evidence, not a runnable
-rollback image. The concise record is
-`/private/tmp/pyfinder-image-verification-20260926/rollback-limitation.txt`.
-Do not assume the old image can be restarted.
-
-The example caller endpoint is `http://host.docker.internal:9010`, explicitly
-selected for this Docker Desktop host and verified by the 2026-09-26 finite
-installed-caller probe. Recheck it after routing changes. Host `127.0.0.1` is not
-container loopback. Linux
-would need its own verified host-gateway or network arrangement; this foundation
-does not add one or infer routing from a successful host HTTP request.
-
-The six `PYFINDER_SHAKEMAP_*` application settings retain the
-[PyFinder adapter semantics](../pyfinder/docs/shakemap-adapter.md). The caller
-selects the initial explicit configuration, with `global` as the default.
-The service never substitutes configurations. PyFinder's bounded caller policy
-first submits the selected region and, only after confirmed configuration failure
-and retained evidence, may submit `global` once with the same public ID and a new
-sequence. It preserves overwrite and reports both outcomes; uncertain acceptance
-or unrelated native failure does not authorize another submission.
-`overwrite=true` recalculates a reused public calculation ID after discarding its
-previous service/product trees; false archives them. The wrapper does not invent
-IDs, infer regions, schedule calculations or modify scientific defaults.
-
-Both processes need actual UID/GID 1000:1000 access to shared inputs. Host file
-ownership alone, particularly on Docker Desktop, does not prove this access.
-Helpers do not recursively chmod/chown existing operator data.
-
-## Operator commands
-
-Bare `make` displays help. Mutation commands require an explicit component.
-Nothing starts continuous operation as a side effect of setup, build or verify.
-
-| Command | Responsibility and side effects |
+| Command | What it checks and changes |
 | --- | --- |
-| `make setup` | Preserve/create local settings and missing PyFinder directories |
-| `make build COMPONENT=pyfinder` | Build `pyfinder:dev` from the component Dockerfile, `linux/amd64`; retains required FinDer base |
-| `make build COMPONENT=shakemap` | Delegate canonical ShakeMap image build |
-| `make data COMPONENT=shakemap DATA_ACTION=inspect` | Read-only asset presence/readability inspection |
-| `make data COMPONENT=shakemap DATA_ACTION=validate` | Read-only pinned asset validation; may hash large files |
-| `make data COMPONENT=shakemap DATA_ACTION=provision` | Explicitly download/import missing assets using the service helper |
-| `make finalize COMPONENT=shakemap` | Explicit service finalization; can create/recreate canonical container and perform native verification |
-| `make start COMPONENT=shakemap` | Start an already finalized, compatible canonical service |
-| `make start COMPONENT=pyfinder` | Start continuous EMSC/provider/FinDer processing with explicitly enabled REST integration |
-| `make stop COMPONENT=pyfinder` | Stop caller without deleting its container or mounted data |
-| `make stop COMPONENT=shakemap` | Delegate the service's graceful-stop boundary |
-| `make status` | Read-only canonical Docker state; not scientific readiness |
-| `make verify` | Read-only host paths, health/configuration GETs, image identity, mounts and caller settings |
-| `make verify-live COMPONENT=shakemap` | **Mutating:** native fixture submission; component helper may revoke readiness and stop service on failure |
-| `make verify-live COMPONENT=pyfinder` | Component installed-image verification; refuses an existing canonical caller container |
-| `make verify-caller EVIDENCE=/absolute/fresh/directory` | Finite installed-caller imports, shared-input access and read-only REST connectivity; refuses any existing canonical caller |
-| `make test` | Host tests with temporary files, fake component commands and an isolated HTTP stub |
+| `make test` | Host tests using temporary files, fake commands and a local HTTP stub; no deployment readiness claim |
+| `make verify` | Read-only host paths, service health/configuration, image identity, mounts and settings; both canonical containers must already exist |
+| `make verify-live COMPONENT=pyfinder` | Installed-image checks with network disabled and temporary runtime; requires the canonical caller name to be absent |
+| `make verify-caller EVIDENCE=/absolute/fresh/evidence-directory` | Finite installed imports, shared-input access and read-only REST checks; creates a transient canonical caller and owned input marker, then removes both |
+| `make verify-live COMPONENT=shakemap` | Native fixture verification; changes service state and can revoke readiness/stop the service on failure |
 
-Use the corresponding `scripts/*-deployment.sh --help` for direct invocation and
-`--config /absolute/path/to/settings` for a reviewed alternate local settings file.
-Component helpers run from their own repository directories, using the activated
-project environment. For manual dataset imports and additional data-helper options,
-use the service's `scripts/manage-shakemap-data.sh` directly with explicit
-`--runtime /Users/savas/my-codes/eew/pyfinder-dev/pyfinder-deploy/runtime`;
-this repository does not duplicate its download/checksum/repair implementation.
+Use a new absolute evidence directory outside runtime for each caller probe. The
+helper refuses an existing `pyfinder-docker`, pins the image identity, uses the
+canonical parent mount and UID/GID, and does not mount application source to hide
+packaging defects. Preserve any existing caller's necessary container-only files
+before a deliberate removal; verification does not perform that removal for you.
+The ordinary caller probe does not run the production listener, FinDer, provider
+queries or email delivery.
 
-Use these deployment helpers for normal operations after the completed move. The service
-repository's bare Make/helper defaults still point at its old development
-`runtime`; they are not redirected silently. Direct service startup/finalization
-must explicitly use `--runtime-root` with the approved deployment runtime. Do not
-initialize a second empty runtime at the former location. The wrappers always
-pass the canonical path and reject an external root.
-
-Start the service before the caller. Stop the caller first when pausing both.
-No automatic restart policy or daemon has been added. Keep successful host tests,
-container-internal checks and real running-service evidence separate. The default
-preflight does not prove caller network reachability, actual UID write access,
-installed adapter capability, successful FinDer execution or regional scientific
-validity. In particular, configuration listing alone is not a native regional run.
-
-Setup and ordinary startup do not perform runtime migration or automatic container
-replacement. Explicit service finalization has the mutating behavior listed above.
-The completed migration evidence is recorded separately; production caller
-activation remains disabled until reviewed.
-
-
-## Verify the installed caller without activating production
-
-First rebuild current PyFinder through `make build COMPONENT=pyfinder`. Its
-Dockerfile retains `FROM ghcr.io/sceylan/finder-base:gmt5`, verifies the downloaded
-Python archive checksum, clones ParamWS over HTTPS and records that exact commit.
-Do not bypass TLS or certificate failures to complete a build. A successful build
-with unpinned dependency versions is evidence for that recorded image, not a claim
-that every future build will resolve identical dependencies.
-
-For a future replacement, preserve any existing canonical caller's inspection
-and container-only files before its explicitly authorized removal. Both verification helpers refuse an
-existing `pyfinder-docker`; neither removes an unrelated instance or invents an
-alternate name. Run `make verify-live COMPONENT=pyfinder` for the existing isolated
-installed-image checks. They keep `--network none` and temporary runtime storage.
-
-Then, while the canonical caller name is absent and integration remains disabled:
+For an explicit synthetic native calculation, use the optional fixture mode:
 
 ```sh
-make verify-caller EVIDENCE="/private/tmp/pyfinder-caller-boundary-<fresh-label>"
-```
-
-Choose a new evidence directory each time. The direct equivalent is
-`scripts/verify-caller-deployment.sh --evidence /absolute/fresh/directory`, with
-optional `--config /absolute/deployment.env`. This uses the existing project
-virtual environment and a transient canonical caller pinned to the inspected
-immutable image ID, running as UID/GID1000:1000. It mounts only the consolidated
-runtime parent and sends finite verification code on stdin to isolated installed
-Python; it does not mount application source or start the continuous entrypoint.
-
-The probe compares installed module hashes against the current checkout, verifies
-package/ParamWS origins and recorded build provenance, checks the selected service
-configuration via read-only health/configuration requests, and proves two-way
-visibility of uniquely owned temporary input markers. It removes only its own
-markers and exact CID/label-owned transient container, including after failure.
-A changed ownership check leaves that resource untouched with a diagnostic.
-Evidence is retained in a private directory; inspect `summary.json` and protected
-process logs for failed or timed-out checks.
-
-By default, no EMSC listener, provider acquisition, operational database, FinDer,
-SMTP or native ShakeMap calculation is invoked. The canonical caller is absent after successful
-verification. These checks establish installed caller code, shared input access
-and connectivity for the inspected image/settings; they do not enable production,
-validate regional scientific coverage, or certify the full scheduled workflow.
-
-
-For an explicitly requested synthetic native calculation, use the same finite
-helper with a fixture and a new public calculation ID:
-
-```sh
-scripts/verify-caller-deployment.sh \
+# Replace both placeholder values with fresh, explicitly owned values.
+./scripts/verify-caller-deployment.sh \
+  --evidence /absolute/fresh/evidence-directory \
   --calculation-fixture tests/fixtures/shakemap-global.json \
-  --event-id "pyfinder-verification-global-<fresh-label>_t00000" \
-  --evidence "/private/tmp/pyfinder-native-global-<fresh-label>"
+  --event-id pyfinder-verification-global-UNUSED_t00000
 ```
 
-Replace both placeholders before running. This option **submits one native job**;
-it is never enabled by `make verify-caller`. The fixture names its configuration
-explicitly. The supplied global point fixture is synthetic: UTC origin
-`2026-09-26T12:30:15.250000Z`, magnitude 5.5, depth 6 km, latitude 42.05 and
-longitude 13.0, with two station components at 42.02/13.02 reporting PGA
-98.0665 cm/s² (10 percent of standard gravity). The fixture schema accepts
-only those explicit event values, `synthetic: true`, `configuration`, and station
-`network`, `station`, `location`, `channel`, `latitude`, `longitude`, `pga_cm_s2`.
-Coordinates use degrees and positive depth uses km. Installed manager/exporter
-classes prepare the point inputs without running FinDer or acquiring observations.
+The fixture supplies a physical UTC origin, coordinates, magnitude, depth and
+station PGA in cm/s². Installed manager/exporter code prepares the inputs without
+running FinDer. The helper requires an idle service and an unused ID across inputs,
+products, current records and archives. It reserves a new playback workspace under
+`runtime/pyfinder/playbacks/<event_id>/shakemap-verification` and keeps its SQLite
+intent, observations, logs and evidence separate from the operational database.
 
-The helper requires an idle service and checks API/current/input/product/archive
-ownership before submission. It exclusively reserves
-`runtime/pyfinder/playbacks/<event_id>/shakemap-verification/`; an existing parent
-calculation directory is rejected. The fixture inputs, submission SQLite database,
-acknowledgement, observations, native logs and validation evidence remain there.
-SQLite access is limited to this workspace, and the existing parent mount is the
-only bind. The operational database remains unopened. One POST is permitted;
-an uncertain acknowledgement is retained and never retried. Polling follows the
-exact acknowledged sequence for at most ten minutes; the finite container has a
-13-minute outer deadline. Timeout/container termination does not cancel the native
-service job. Inspect the retained intent, observations and service state before
-any further action; do not reuse the ID or evidence directory.
+The helper makes one POST and follows the exact acknowledged sequence with bounded
+polling. It never retries uncertain acceptance. A timeout does not cancel a native
+job. Results and failed-run evidence are retained; only the transient caller and
+owned probe markers are removed. Native calculations can make their own external
+requests, including STREC lookups.
 
-Native `SUCCESS` must pass the full product manifest and core-product gate, every
-product hash/size, provenance, logs and exported-input snapshot checks. Selected
-profile file identities are verified; regional materialization must match the
-explicit regional source files byte for byte. The global profile must reference
-its canonical managed VS30/topography files and their recorded hashes must match.
-These checks record dataset declarations and selected paths, but do not claim an
-independent observation of native dataset use or validate scientific accuracy.
+Successful verification requires the product manifest, core products, hashes,
+provenance, logs and selected-profile evidence. An explicit `--expect-native FAILED`
+asserts a known negative test; it never establishes regional readiness. This helper
+submits one selected configuration and does not exercise scheduler-owned fallback.
 
-Regional fixtures use the same helper and units with an explicitly selected
-configuration. The current controlled verification matrix is:
+## Activate and stop continuous operation
 
-| Fixture | Expected native outcome | Additional option |
-| --- | --- | --- |
-| `tests/fixtures/shakemap-global.json` | SUCCESS | Default |
-| `tests/fixtures/shakemap-belgium.json` | FAILED, unchanged profile negative check | `--expect-native FAILED` |
-| `tests/fixtures/shakemap-france.json` | SUCCESS, corrected profile | Default |
-| `tests/fixtures/shakemap-croatia.json` | SUCCESS, corrected profile | Default |
-| `tests/fixtures/shakemap-slovenia.json` | SUCCESS, corrected profile | Default |
+After the required verification and configuration review, set
+`PYFINDER_SHAKEMAP_ENABLED=true` and start the caller:
 
-The 2026-09-26 outcomes and their limits are recorded in Current deployment state
-above. Future runs must assert their own results with the then-current profiles
-and assets. Choose a fresh profile-specific ID and evidence directory for every invocation.
-A matched failure means the explicit failure assertion passed; it never means
-regional readiness. No global fallback or configuration repair is attempted.
-Harness/evidence failures are distinct and remain nonzero even when native
-`FAILED` was observed. The helper retains all fixture/service results for review,
-including failures, and cleans only its transient caller and input markers.
-No production listener, provider, FinDer or SMTP workflow is started by this mode.
+```sh
+# This starts continuous alert reception, provider queries and FinDer processing.
+make start COMPONENT=pyfinder
 
-For the five regional native files, supported data helpers and current
-Italy/Switzerland prerequisites, see the service-owned
-[configuration runbook](../shakemap-docker/docs/configuration.md).
+# Once both canonical containers exist, inspect their configured wiring.
+make verify
+
+# When pausing both components, stop the caller before the service.
+make stop COMPONENT=pyfinder
+make stop COMPONENT=shakemap
+```
+
+Stopping does not delete containers or mounted data. The helpers do not add
+restart supervision or a background host daemon.
+
+## Limits and further configuration
+
+Global readiness does not certify a regional profile or scientific accuracy.
+Italy and Switzerland require their own compatible scientific modules, regional
+data and configuration checks described in the service guide. Runtime-only profile
+changes are not automatically reproduced by setup or a fresh checkout. A successful
+fixture applies to that fixture, profile, data and image; it does not validate every
+geographic branch or the full scheduled production chain.
+
+Finite caller checks do not establish actual provider acquisition, FinDer results,
+scheduler recovery, notification delivery or operational supervision. Validate
+those boundaries separately before relying on continuous operation. Build inputs
+can also change upstream; retain the actual image and recorded dependency identity
+when reproducibility matters.
+
+Run `make help` for aliases. Operational wrappers and the caller verifier accept
+`--help` and, where applicable, `--config /absolute/path/to/deployment.env` for alternate literal
+settings. The component documentation remains authoritative for
+[PyFinder workflows](../pyfinder/README.md) and
+[ShakeMap service operations](../shakemap-docker/README.md).

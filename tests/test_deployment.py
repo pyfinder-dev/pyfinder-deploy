@@ -110,6 +110,32 @@ class DeploymentTests(unittest.TestCase):
         self.assertEqual(self.config.read_text().splitlines()[0],
                          "PYFINDER_REPOSITORY=" + str(self.pyfinder))
 
+    def test_portable_template_requires_paths_and_preserves_completed_setup(self):
+        # Exercise the shipped template in a new temporary deployment, not the
+        # operator checkout. Setup must work before its required paths are set.
+        template = (deployment.ROOT / "deployment.env.example").read_text()
+        (self.root / "deployment.env.example").write_text(template)
+        destination = self.root / "first-setup.env"
+        with patch.object(deployment, "ROOT", self.root):
+            deployment.setup(destination)
+            self.assertEqual(destination.read_text(), template)
+            with self.assertRaisesRegex(deployment.DeploymentError, "PYFINDER_REPOSITORY"):
+                deployment.load_settings(destination)
+
+            completed = template
+            for key in ("PYFINDER_REPOSITORY", "SHAKEMAP_REPOSITORY", "SHAKEMAP_RUNTIME_ROOT"):
+                completed = completed.replace(key + "=\n", key + "=" + self.settings[key] + "\n")
+            completed = completed.replace("PYFINDER_SHAKEMAP_URL=\n", "PYFINDER_SHAKEMAP_URL=http://service.example:9010\n")
+            destination.write_text(completed)
+            loaded = deployment.load_settings(destination)
+            self.assertEqual(loaded["SHAKEMAP_RUNTIME_ROOT"], str(self.runtime))
+            self.assertEqual(loaded["PYFINDER_SHAKEMAP_ENABLED"], "false")
+            self.assertEqual(loaded["PYFINDER_ALERT_CONFIG"], "")
+
+            deployment.setup(destination)
+            self.assertEqual(destination.read_text(), completed)
+            self.assertEqual(deployment.load_settings(destination), loaded)
+
     def test_invalid_scalars_are_rejected(self):
         for key, value in (("SHAKEMAP_PORT", "65536"), ("SHAKEMAP_MAX_CONCURRENT", "0"),
                            ("PYFINDER_SHAKEMAP_REQUEST_TIMEOUT_SECONDS", "nan"),
