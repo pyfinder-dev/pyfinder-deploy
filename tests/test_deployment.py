@@ -337,15 +337,24 @@ class DeploymentTests(unittest.TestCase):
 
         parent = {"Type": "bind", "Source": str(self.runtime),
                   "Destination": "/home/sysop/runtime", "RW": True}
-        service = {"Image": "image-id", "Mounts": [parent.copy()]}
+        service = {
+            "Image": "image-id",
+            "Mounts": [parent.copy()],
+            "State": {"Running": True},
+        }
         for name in ("global", "regional", "test"):
             service["Mounts"].append({
                 "Type": "bind", "Source": str(self.runtime / "shakemap/data" / name),
                 "Destination": f"/home/sysop/runtime/shakemap/data/{name}", "RW": False,
             })
-        caller = {"Image": "image-id", "Mounts": [parent.copy()], "Config": {
-            "Env": [f"{key}={self.settings[key]}" for key in deployment.APPLICATION_KEYS],
-        }}
+        caller = {
+            "Image": "image-id",
+            "Mounts": [parent.copy()],
+            "State": {"Running": True},
+            "Config": {
+                "Env": [f"{key}={self.settings[key]}" for key in deployment.APPLICATION_KEYS],
+            },
+        }
         return [{"Id": "image-id"}, service, {"Id": "image-id"}, caller]
 
     def check_preflight(self, records):
@@ -353,8 +362,10 @@ class DeploymentTests(unittest.TestCase):
             {"ready": True}, {"configurations": ["global"]},
         ]), patch.object(deployment, "inspect", side_effect=records), \
                 patch.object(deployment, "helper") as helper:
-            deployment.preflight(self.settings)
-            helper.assert_not_called()
+            try:
+                deployment.preflight(self.settings)
+            finally:
+                helper.assert_not_called()
 
     def test_preflight_accepts_enabled_caller_with_only_common_parent_bind(self):
         self.settings["PYFINDER_SHAKEMAP_ENABLED"] = "true"
@@ -379,6 +390,19 @@ class DeploymentTests(unittest.TestCase):
                 deployment.DeploymentError, "mounts"
             ):
                 self.check_preflight(records)
+
+    def test_preflight_rejects_stopped_containers_without_lifecycle_mutation(self):
+        # A healthy HTTP response can outlive or come from another container.
+        # Require the inspected canonical owner itself to be running as well.
+        for index, name in ((1, "shakemap-docker"), (3, "pyfinder-docker")):
+            records = self.preflight_records()
+            records[index]["State"]["Running"] = False
+            with self.subTest(container=name), patch.object(deployment, "run") as run:
+                with self.assertRaisesRegex(
+                    deployment.DeploymentError, name + ": canonical container is not running"
+                ):
+                    self.check_preflight(records)
+                run.assert_not_called()
 
     def test_preflight_refuses_stale_image_without_lifecycle_mutation(self):
         records = self.preflight_records()

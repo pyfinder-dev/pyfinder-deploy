@@ -305,6 +305,14 @@ def preflight(settings):
     ):
         image = inspect("image", image_name)
         container = inspect("container", container_name)
+
+        # Matching mounts and image bytes do not establish a running caller.
+        # Strict verification observes both owners and never starts either one.
+        if container.get("State", {}).get("Running") is not True:
+            raise DeploymentError(
+                f"{container_name}: canonical container is not running; no container was changed"
+            )
+
         problems = container_problems(settings, component, image, container)
         if problems:
             raise DeploymentError(f"{container_name}: {problems[0]}; no container was changed")

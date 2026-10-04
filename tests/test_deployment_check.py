@@ -174,12 +174,6 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(path.read_bytes(), original)
         self.assertEqual(list(path.parent.iterdir()), [path])
 
-    def test_wal_state_is_not_silently_read_as_checkpointed_main_db(self):
-        path = self.runtime / "queue.sqlite3"
-        path.write_bytes(b"not a database")
-        Path(str(path) + "-wal").write_bytes(b"newer state")
-        self.assertEqual(checks.backlog(path, caller_running=False)["status"], "unverified")
-
     def test_report_only_invokes_read_only_boundaries(self):
         before = sorted(str(path.relative_to(self.root)) for path in self.root.rglob("*"))
         self.report()

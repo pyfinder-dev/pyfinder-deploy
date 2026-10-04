@@ -1,6 +1,6 @@
 # Every target delegates to one responsibility-specific helper.
 .DEFAULT_GOAL := help
-.PHONY: help setup build data finalize start stop status check verify verify-image verify-native verify-live verify-caller test
+.PHONY: help setup build data finalize start stop status check verify verify-image verify-native verify-caller test
 COMPONENT ?=
 EVIDENCE ?=
 DATA_ACTION ?=
@@ -34,9 +34,6 @@ verify-image:
 	./scripts/verify-deployment.sh --live --component pyfinder
 verify-native:
 	./scripts/verify-deployment.sh --live --component shakemap
-# Retained explicit component route; prefer the descriptive aliases above.
-verify-live:
-	./scripts/verify-deployment.sh --live --component "$${COMPONENT}"
 verify-caller:
 	./scripts/verify-caller-deployment.sh --evidence "$${EVIDENCE}"
 test:

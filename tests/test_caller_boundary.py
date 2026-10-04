@@ -108,7 +108,9 @@ class CallerBoundaryTests(unittest.TestCase):
             return probe.verify(self.settings, self.evidence)
 
     def test_success_pins_image_and_checks_real_shared_marker_without_source_mount(self):
+        self.assertEqual(list(self.source.iterdir()), [])
         result = self.verify()
+        self.assertEqual(list(self.source.iterdir()), [])
         arguments, options = next(call for call in self.calls if call[0][1] == "run")
         self.assertEqual(arguments[-3:], [IMAGE_ID, "-I", "-"])
         self.assertEqual(arguments[arguments.index("--name") + 1], "pyfinder-docker")
@@ -125,12 +127,6 @@ class CallerBoundaryTests(unittest.TestCase):
         self.assertEqual(list(self.inputs.iterdir()), [])
         self.assertTrue(json.loads((self.evidence / "summary.json").read_text())["passed"])
         self.assertEqual(self.evidence.stat().st_mode & 0o777, 0o700)
-
-    def test_installed_probe_needs_no_checkout_python_sources(self):
-        self.assertEqual(list(self.source.iterdir()), [])
-        result = self.verify()
-        self.assertEqual(set(result["installed_modules"]), set(probe.MODULES))
-        self.assertEqual(list(self.source.iterdir()), [])
 
     def installed_origins(self, package, names, modules):
         # Execute the actual small import guard embedded in the container probe,

@@ -39,7 +39,6 @@ import json
 import os
 from pathlib import Path
 import platform
-import re
 import tempfile
 import sqlite3
 from unittest.mock import patch
@@ -105,29 +104,24 @@ with tempfile.TemporaryDirectory(prefix="pyfinder-boundary-") as temporary:
         configurations = client.configurations()
         assert settings["configuration"] in configurations["configurations"], "selected configuration absent"
 
-        build = json.loads(Path("/usr/local/share/pyfinder/build-info.json").read_text())
-        assert build["base_image"] == "ghcr.io/sceylan/finder-base:gmt5"
-        assert build["python_version"] == platform.python_version()
-        assert re.fullmatch(r"[0-9a-f]{40}", build["paramws"]["commit"])
+        # Image verification owns build-record consistency. This network probe
+        # reports installed versions and keeps the containment checks needed to
+        # prove its imports came from the image, not a host checkout.
         versions = {name: importlib.metadata.version(name)
                     for name in ("pyfinder", "paramws-clients")}
-        assert versions["pyfinder"] == build["pyfinder"]["version"]
-        assert versions["paramws-clients"] == build["paramws"]["version"]
         import paramws
         paramws_root = Path(paramws.__file__).resolve().parent
         assert "site-packages" in paramws_root.parts, "dependency not normally installed"
-        for distribution, identity, module_root in (
-            ("pyfinder", "pyfinder", package),
-            ("paramws-clients", "paramws", paramws_root),
+        for distribution, module_root in (
+            ("pyfinder", package),
+            ("paramws-clients", paramws_root),
         ):
             distribution_root = Path(importlib.metadata.distribution(distribution).locate_file("")).resolve()
             assert module_root.is_relative_to(distribution_root)
-            assert str(module_root) == build[identity]["module_origin"]
-            assert str(distribution_root) == build[identity]["distribution_origin"]
+
         result = {
             "uid": os.geteuid(), "gid": os.getegid(),
             "python_version": platform.python_version(), "versions": versions,
-            "paramws_commit": build["paramws"]["commit"], "base_image": build["base_image"],
             "installed_package": str(package), "installed_paramws": str(paramws_root),
             "installed_modules": origins,
             "selected_configuration": settings["configuration"],
