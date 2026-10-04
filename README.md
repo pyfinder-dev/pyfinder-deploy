@@ -152,6 +152,58 @@ application ownership is not filesystem isolation. ShakeMap's global, regional a
 test dataset overlays are read-only in the service container. They do not make the
 caller's view read-only or authorize it to modify service datasets.
 
+## Check the current installation
+
+Run `make check` before choosing the next installation or activation action. It
+accumulates independent findings even when settings, images or containers are
+missing. It reads literal settings, Docker inventory and inspection, GET service
+health/configuration checks, and an existing closed operational queue. It does
+not build, download, provision, start containers, submit calculations, send email,
+change readiness or write queue state. No report is saved automatically.
+
+```sh
+make check
+# The helper also accepts an alternate literal settings file.
+./scripts/check-deployment.sh --config /absolute/path/to/deployment.env
+# Opt in to the full structured report for automation or detailed inspection.
+./scripts/check-deployment.sh --json
+```
+
+The default report groups required issues and actions, compact successful checks,
+profile findings, conditional fallback and evidence limits. It identifies
+configuration files, setting keys and the service's
+resolved asset paths where available. Fix the reported setting or resource using
+the named component helper; the check never repairs scientific profiles. Global,
+Italy and Switzerland are visible independently. Only the selected configuration
+contributes to the deployment result; a broken unused example does not block a
+selected global configuration.
+
+`usable` means the inspected static capability has no known blocker. `degraded`
+means a known limited capability remains usable. `blocked` identifies a confirmed
+obstacle, including an absent continuous caller or overdue queue requiring an
+operator decision. `unverified` means required evidence is unavailable, including
+an older service without the diagnostic endpoint. The direct `check-deployment.sh` helper returns **0** for usable or degraded,
+**1** for blocked, and **2** for unverified (also conventional usage errors).
+GNU Make returns **2** when its recipe fails, so inspect the report status or invoke
+the helper directly when distinguishing blocked from unverified in automation.
+When findings differ, blocked takes precedence over unverified. Neither
+exit 0 nor a listed profile proves native execution or scientific coverage.
+
+The caller settings check runs the configured source checkout with the deployment
+settings and known host input mount. It is not proof of installed-image behavior.
+Regional recovery remains conditional: PyFinder submits the selected region first
+and may submit global only after its confirmed eligible failure. A static regional
+error does not skip that first request. Global is assessed separately, and unknown
+installed caller behavior remains unverified.
+
+Email may remain explicitly disabled; real SMTP delivery is not a universal
+activation prerequisite. Configured or implicitly discovered email is reported as
+unverified because this command does not send mail. For the queue, absent state
+means startup initializes an empty queue. An existing closed, sidecar-free SQLite
+snapshot reports status counts and overdue pending work. Active or uncertain state
+is unverified. Preserve existing work and decide whether it belongs to this
+installation before activation; no helper silently clears or resets a backlog.
+
 ## Verify before continuous operation
 
 Keep host tests, installed-image checks and running-service checks separate.
@@ -169,9 +221,15 @@ been created; it does not replace these pre-activation checks.
 | --- | --- |
 | `make test` | Host tests using temporary files, fake commands and a local HTTP stub; no deployment readiness claim |
 | `make verify` | Read-only host paths, service health/configuration, image identity, mounts and settings; both canonical containers must already exist |
-| `make verify-live COMPONENT=pyfinder` | Installed-image checks with network disabled and temporary runtime; requires the canonical caller name to be absent |
+| `make verify-image` | Installed-image checks with network disabled and temporary runtime; requires the canonical caller name to be absent |
 | `make verify-caller EVIDENCE=/absolute/fresh/evidence-directory` | Finite installed imports, shared-input access and read-only REST checks; creates a transient canonical caller and owned input marker, then removes both |
-| `make verify-live COMPONENT=shakemap` | Native fixture verification; changes service state and can revoke readiness/stop the service on failure |
+| `make verify-native` | Native fixture verification; changes service state and can revoke readiness/stop the service on failure |
+
+`make verify-live COMPONENT=pyfinder|shakemap` remains an explicit component route
+to the same helpers; prefer the descriptive aliases above. `verify` is the strict
+running-deployment wiring check, while `check` diagnoses incomplete installations.
+The component repositories own installed-image and native verification logic;
+deployment supplies settings and delegates instead of maintaining another verifier.
 
 Use a new absolute evidence directory outside runtime for each caller probe. The
 helper refuses an existing `pyfinder-docker`, pins the image identity, uses the

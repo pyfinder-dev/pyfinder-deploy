@@ -50,7 +50,7 @@ def absolute_directory(value, name, *, required=True):
     return path
 
 
-def load_settings(path):
+def read_settings(path):
     """Read literal values without interpreting shell quotes or substitutions."""
     try:
         contents = path.read_text(encoding="utf-8")
@@ -68,49 +68,74 @@ def load_settings(path):
             raise DeploymentError(f"Configuration line {number}: use a literal value without shell syntax or edge whitespace")
         settings[key] = value
 
-    if not KEYS.issubset(settings):
-        raise DeploymentError("Configuration has missing settings; compare its keys with deployment.env.example")
+    return settings
+
+
+def settings_problems(settings):
+    """Collect independent setting errors without exposing supplied values.
+
+    Mutating helpers still reject the first problem through load_settings.
+    The read-only check uses the same rules to explain incomplete setup at once.
+    """
+    problems = []
+    for key in sorted(KEYS - settings.keys()):
+        problems.append((key, "required setting is missing"))
 
     for key in ("PYFINDER_REPOSITORY", "SHAKEMAP_REPOSITORY"):
-        absolute_directory(settings[key], key)
-    service_runtime(settings)
+        if key not in settings:
+            continue
+        try:
+            absolute_directory(settings[key], key)
+        except DeploymentError as error:
+            problems.append((key, str(error)))
 
-    # Forward only a path into the existing caller bind, never credentials or
-    # another mount. Absence keeps legacy discovery; empty explicitly disables.
+    if "SHAKEMAP_RUNTIME_ROOT" in settings:
+        try:
+            service_runtime(settings)
+        except DeploymentError as error:
+            problems.append(("SHAKEMAP_RUNTIME_ROOT", str(error)))
+
     alert_path = settings.get("PYFINDER_ALERT_CONFIG")
     if alert_path:
         path = Path(alert_path)
         caller_root = Path("/home/sysop/runtime/pyfinder")
         if not path.is_absolute() or ".." in path.parts or path == caller_root or not path.is_relative_to(caller_root):
-            raise DeploymentError("PYFINDER_ALERT_CONFIG: use a file inside /home/sysop/runtime/pyfinder or empty to disable")
-        host_path = PYFINDER_RUNTIME / path.relative_to("/home/sysop/runtime")
-        if host_path.resolve() != host_path or not host_path.is_file():
-            raise DeploymentError("PYFINDER_ALERT_CONFIG: mapped file is missing or uses symlinks; place the existing separate email configuration in caller runtime")
+            problems.append(("PYFINDER_ALERT_CONFIG", "use a file inside /home/sysop/runtime/pyfinder or empty to disable"))
+        else:
+            host_path = PYFINDER_RUNTIME / path.relative_to("/home/sysop/runtime")
+            if host_path.resolve() != host_path or not host_path.is_file():
+                problems.append(("PYFINDER_ALERT_CONFIG", "mapped file is missing or uses symlinks; place the existing separate email configuration in caller runtime"))
 
     for key in ("PYFINDER_SHAKEMAP_ENABLED", "PYFINDER_SHAKEMAP_OVERWRITE"):
-        if settings[key] not in {"true", "false"}:
-            raise DeploymentError(f"{key}: use exactly true or false")
+        if key in settings and settings[key] not in {"true", "false"}:
+            problems.append((key, "use exactly true or false"))
     for key in ("SHAKEMAP_PORT", "SHAKEMAP_MAX_CONCURRENT"):
-        if not settings[key].isascii() or not settings[key].isdigit() or int(settings[key]) < 1:
-            raise DeploymentError(f"{key}: use a positive integer")
-    if int(settings["SHAKEMAP_PORT"]) > 65535:
-        raise DeploymentError("SHAKEMAP_PORT: use an integer from 1 through 65535")
+        value = settings.get(key)
+        if value is None:
+            continue
+        if not value.isascii() or not value.isdigit() or int(value) < 1:
+            problems.append((key, "use a positive integer"))
+        elif key == "SHAKEMAP_PORT" and int(value) > 65535:
+            problems.append((key, "use an integer from 1 through 65535"))
 
-    try:
-        timeout = float(settings["PYFINDER_SHAKEMAP_REQUEST_TIMEOUT_SECONDS"])
-    except ValueError:
-        timeout = math.nan
-    if not math.isfinite(timeout) or timeout <= 0:
-        raise DeploymentError("PYFINDER_SHAKEMAP_REQUEST_TIMEOUT_SECONDS: use a positive finite number")
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", settings["PYFINDER_SHAKEMAP_CONFIGURATION"]):
-        raise DeploymentError("PYFINDER_SHAKEMAP_CONFIGURATION: use an explicit service configuration name")
-    if settings["PYFINDER_SHAKEMAP_INPUT_DIRECTORY"] != INPUT_TARGET:
-        raise DeploymentError("PYFINDER_SHAKEMAP_INPUT_DIRECTORY: retain the documented canonical container input path")
+    key = "PYFINDER_SHAKEMAP_REQUEST_TIMEOUT_SECONDS"
+    if key in settings:
+        try:
+            timeout = float(settings[key])
+        except ValueError:
+            timeout = math.nan
+        if not math.isfinite(timeout) or timeout <= 0:
+            problems.append((key, "use a positive finite number"))
+    key = "PYFINDER_SHAKEMAP_CONFIGURATION"
+    if key in settings and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", settings[key]):
+        problems.append((key, "use an explicit service configuration name"))
+    key = "PYFINDER_SHAKEMAP_INPUT_DIRECTORY"
+    if key in settings and settings[key] != INPUT_TARGET:
+        problems.append((key, "retain the documented canonical container input path"))
 
-    # Validate URLs even when disabled, without echoing credentials or other
-    # accidental private content in an error. A missing URL remains a visible
-    # setup task until the operator deliberately enables integration.
-    url = settings["PYFINDER_SHAKEMAP_URL"]
+    # URLs are checked even when integration is disabled. Their contents never
+    # enter diagnostics because malformed values may contain credentials.
+    url = settings.get("PYFINDER_SHAKEMAP_URL", "")
     if url:
         try:
             parsed = urlsplit(url)
@@ -123,8 +148,17 @@ def load_settings(path):
         except ValueError:
             valid = False
         if not valid:
-            raise DeploymentError("PYFINDER_SHAKEMAP_URL: use an absolute HTTP(S) URL without credentials, query, or fragment")
+            problems.append(("PYFINDER_SHAKEMAP_URL", "use an absolute HTTP(S) URL without credentials, query, or fragment"))
+    return problems
 
+
+def load_settings(path):
+    """Require complete, valid settings before an operational action."""
+    settings = read_settings(path)
+    problems = settings_problems(settings)
+    if problems:
+        key, reason = problems[0]
+        raise DeploymentError(f"{key}: {reason}")
     return settings
 
 
@@ -226,6 +260,29 @@ def inspect(resource, name):
         raise DeploymentError("Docker inspection returned an unexpected response") from exc
 
 
+def container_problems(settings, component, image, container):
+    """Share canonical deployment wiring checks between verify and check."""
+    problems = []
+    if container.get("Image") != image.get("Id"):
+        problems.append("stale image; deliberate container replacement is required")
+    runtime = PYFINDER_RUNTIME
+    expected = {(str(runtime), "/home/sysop/runtime", True)}
+    if component == "shakemap":
+        expected |= {(str(runtime / "shakemap/data" / name),
+                      f"/home/sysop/runtime/shakemap/data/{name}", False)
+                     for name in ("global", "regional", "test")}
+    mounts = {(item.get("Source"), item.get("Destination"), item.get("RW"))
+              for item in container.get("Mounts", []) if item.get("Type") == "bind"}
+    if mounts != expected or len(container.get("Mounts", [])) != len(expected):
+        problems.append("runtime mounts do not match reviewed settings")
+    if component == "pyfinder":
+        actual = dict(item.split("=", 1) for item in container.get("Config", {}).get("Env", []) if "=" in item)
+        for key in (*APPLICATION_KEYS, *OPTIONAL_KEYS):
+            if actual.get(key) != settings.get(key):
+                problems.append(f"{key} differs")
+    return problems
+
+
 def preflight(settings):
     """Inspect wiring only; do not run native verification or start processes."""
     runtime = service_runtime(settings)
@@ -248,30 +305,20 @@ def preflight(settings):
     ):
         image = inspect("image", image_name)
         container = inspect("container", container_name)
-        if container.get("Image") != image.get("Id"):
-            raise DeploymentError(f"{container_name}: stale image; deliberate container replacement is required")
-        mounts = {(item.get("Source"), item.get("Destination"), item.get("RW"))
-                  for item in container.get("Mounts", []) if item.get("Type") == "bind"}
-        if component == "shakemap":
-            expected = {(str(runtime), "/home/sysop/runtime", True)}
-            expected |= {(str(runtime / "shakemap/data" / name),
-                          f"/home/sysop/runtime/shakemap/data/{name}", False)
-                         for name in ("global", "regional", "test")}
-        else:
-            expected = {(str(PYFINDER_RUNTIME), "/home/sysop/runtime", True)}
-        if mounts != expected or len(container.get("Mounts", [])) != len(expected):
-            raise DeploymentError(f"{container_name}: runtime mounts do not match reviewed settings; no container was changed")
-        if component == "pyfinder":
-            actual = dict(item.split("=", 1) for item in container.get("Config", {}).get("Env", []) if "=" in item)
-            for key in (*APPLICATION_KEYS, *OPTIONAL_KEYS):
-                if actual.get(key) != settings.get(key):
-                    raise DeploymentError(f"{container_name}: {key} differs; no setting was applied")
+        problems = container_problems(settings, component, image, container)
+        if problems:
+            raise DeploymentError(f"{container_name}: {problems[0]}; no container was changed")
         print(f"{container_name}: inspected image identity and runtime mounts.")
 
     print("Host preflight passed. Caller-network reachability, UID write access, installed adapter modules, and native/regional execution remain separate checks.")
 
 
 def dispatch(args):
+    if args.action == "check":
+        # Import only the small diagnostic helper. Scientific application
+        # startup, log handlers and database owners are never constructed here.
+        from check_deployment import check
+        return check(sys.modules[__name__], args.config, json_output=args.json)
     if args.action == "setup":
         setup(args.config)
         return
@@ -327,13 +374,28 @@ def dispatch(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("setup", "build", "data", "finalize", "start", "stop", "status", "verify"))
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        epilog=(
+            "check accumulates read-only diagnostics for incomplete installations; "
+            "verify requires both existing containers and checks wiring read-only. "
+            "verify --live --component pyfinder creates an offline temporary caller; "
+            "verify --live --component shakemap runs native verification and can "
+            "change readiness or stop the service. Prefer make verify-image or "
+            "make verify-native for these explicit workflows."
+        ),
+    )
+    parser.add_argument("action", choices=("setup", "build", "data", "finalize", "start", "stop", "status", "check", "verify"))
     parser.add_argument("--config", type=Path, default=ROOT / "deployment.env")
     parser.add_argument("--component", choices=("pyfinder", "shakemap"))
     parser.add_argument("--data-action", choices=("inspect", "validate", "provision", "stage"))
-    parser.add_argument("--live", action="store_true")
+    parser.add_argument("--live", action="store_true",
+                        help="Run the selected component verifier with the side effects described below")
+    parser.add_argument("--json", action="store_true",
+                        help="Print the full structured check report instead of concise operator text")
     args = parser.parse_args()
+    if args.json and args.action != "check":
+        parser.error("--json belongs to check only")
     if args.live and args.action != "verify":
         parser.error("--live belongs to verify only")
     if args.data_action and args.action != "data":
@@ -341,7 +403,7 @@ def main():
     if sys.prefix == sys.base_prefix:
         parser.error("Activate the existing project virtual environment; do not use system Python")
     try:
-        dispatch(args)
+        return dispatch(args)
     except DeploymentError as exc:
         print(f"deployment: {exc}", file=sys.stderr)
         return 1
