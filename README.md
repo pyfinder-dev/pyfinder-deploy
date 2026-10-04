@@ -274,6 +274,31 @@ provenance, logs and selected-profile evidence. An explicit `--expect-native FAI
 asserts a known negative test; it never establishes regional readiness. This helper
 submits one selected configuration and does not exercise scheduler-owned fallback.
 
+## Reset scheduled work explicitly
+
+`make reset` clears all rows in the continuous caller's scheduler table, including
+pending, processing and terminal schedule records. The canonical `pyfinder-docker`
+container must be stopped or absent; unknown Docker state also blocks the reset.
+Keep other processes that write the caller database stopped during this operation.
+
+The command acts only on `runtime/pyfinder/state/scheduled_queries.sqlite3` in
+this deployment checkout; it accepts neither a component selector nor an alternate
+configuration file to change that scope. It retains all other database tables, including
+alert deliveries/evidence and ShakeMap submission records. It preserves playback
+state, configurations, datasets, logs, calculation products and evidence files.
+Already accepted ShakeMap jobs may still finish and be observed; pending mail
+may still be delivered after startup. Reset cancels neither. SQLite handles
+valid journals transactionally; redirected files and an active database writer
+cause refusal. No state is created when the scheduler database is absent.
+
+```sh
+make stop COMPONENT=pyfinder
+make reset
+```
+
+This is an explicit deletion of scheduler history and pending work. Ordinary
+startup continues to retain and process scheduled work; reset is never automatic.
+
 ## Activate and stop continuous operation
 
 After the required verification and configuration review, set

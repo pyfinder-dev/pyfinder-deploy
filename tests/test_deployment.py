@@ -4,6 +4,8 @@ import argparse
 import importlib.util
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import os
+import sqlite3
+import subprocess
 from pathlib import Path
 import tempfile
 import threading
@@ -59,6 +61,194 @@ class DeploymentTests(unittest.TestCase):
         self.settings["SHAKEMAP_RUNTIME_ROOT"] = str(self.runtime)
         (self.runtime / "shakemap/data/inputs").mkdir(parents=True, exist_ok=True)
         self.write_config()
+
+    def scheduler_database(self):
+        """Build shared temporary state without importing application startup."""
+        path = self.runtime / "pyfinder/state/scheduled_queries.sqlite3"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        connection = sqlite3.connect(path)
+        self.addCleanup(connection.close)
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute(
+            "CREATE TABLE event_tracker (event_id TEXT, service TEXT, "
+            "current_delay_time REAL, status TEXT, next_query_time TEXT, "
+            "PRIMARY KEY (event_id, service, current_delay_time))"
+        )
+        connection.executemany(
+            "INSERT INTO event_tracker VALUES (?, 'RRSM', 0, ?, '2000-01-01')",
+            [(status, status) for status in ("pending", "processing", "completed", "failed")],
+        )
+        for table in (
+            "alert_deliveries", "alert_evidence", "shakemap_submissions",
+            "shakemap_scheduled_attempts", "shakemap_global_fallbacks",
+            "shakemap_evidence_holds",
+        ):
+            connection.execute(f"CREATE TABLE {table} (retained TEXT)")
+            connection.execute(f"INSERT INTO {table} VALUES ('preserved')")
+        connection.commit()
+        return path, connection
+
+    def test_reset_clears_only_scheduler_rows_in_shared_wal_database(self):
+        path, connection = self.scheduler_database()
+        preserved_files = []
+        for relative in (
+            "pyfinder/logs/process.log", "pyfinder/state/alert-evidence/evidence.json",
+            "pyfinder/state/playbacks/one/scheduled_queries.sqlite3",
+            "pyfinder/config/email.json", "shakemap/data/regional/model.conf",
+            "shakemap/products/event/current/grid.xml",
+        ):
+            item = self.runtime / relative
+            item.parent.mkdir(parents=True, exist_ok=True)
+            item.write_bytes(b"preserved bytes")
+            preserved_files.append(item)
+        self.assertTrue(Path(str(path) + "-wal").is_file())
+        before = self.config.read_bytes()
+
+        with (
+            patch.object(deployment, "run", return_value=""),
+            patch.object(deployment, "inspect") as inspect,
+        ):
+            deployment.reset_scheduler()
+            inspect.assert_not_called()
+
+        self.assertEqual(connection.execute("SELECT COUNT(*) FROM event_tracker").fetchone()[0], 0)
+        for (table,) in connection.execute("SELECT name FROM sqlite_master WHERE type='table'"):
+            if table != "event_tracker":
+                self.assertEqual(connection.execute(f"SELECT * FROM {table}").fetchall(), [("preserved",)])
+        self.assertEqual(self.config.read_bytes(), before)
+        for item in preserved_files:
+            self.assertEqual(item.read_bytes(), b"preserved bytes")
+
+    def test_reset_accepts_confirmed_stopped_caller(self):
+        _path, connection = self.scheduler_database()
+        state = {"State": {"Running": False, "Restarting": False, "Status": "exited"}}
+        with (
+            patch.object(deployment, "run", return_value="pyfinder-docker\n"),
+            patch.object(deployment, "inspect", return_value=state),
+        ):
+            deployment.reset_scheduler()
+        self.assertEqual(connection.execute("SELECT COUNT(*) FROM event_tracker").fetchone()[0], 0)
+
+    def test_reset_refuses_running_or_unknown_caller_before_opening_database(self):
+        path, connection = self.scheduler_database()
+        # A common-parser component flag must not retarget this fixed-scope
+        # operation, or accidentally authorize a reset of the wrong component.
+        with patch.object(deployment, "reset_scheduler") as reset:
+            for component, message in (("shakemap", "omit --component"), (None, "omit --config")):
+                with self.subTest(component=component), self.assertRaisesRegex(deployment.DeploymentError, message):
+                    deployment.dispatch(self.arguments("reset", component))
+            reset.assert_not_called()
+
+        cases = (
+            {"State": {"Running": True, "Restarting": False, "Status": "running"}},
+            {"State": {"Running": False, "Restarting": True, "Status": "restarting"}},
+            {"State": {}},
+        )
+        for state in cases:
+            with (
+                self.subTest(state=state),
+                patch.object(deployment, "run", return_value="pyfinder-docker\n"),
+                patch.object(deployment, "inspect", return_value=state),
+                patch.object(deployment.sqlite3, "connect") as connect,
+            ):
+                with self.assertRaises(deployment.DeploymentError):
+                    deployment.reset_scheduler()
+                connect.assert_not_called()
+        with (
+            patch.object(deployment, "run", side_effect=deployment.DeploymentError("Docker unavailable")),
+            patch.object(deployment.sqlite3, "connect") as connect,
+        ):
+            with self.assertRaises(deployment.DeploymentError):
+                deployment.reset_scheduler()
+            connect.assert_not_called()
+        self.assertTrue(path.is_file())
+        self.assertEqual(connection.execute("SELECT COUNT(*) FROM event_tracker").fetchone()[0], 4)
+
+    def test_reset_refuses_redirected_database_or_sidecars(self):
+        state = self.runtime / "pyfinder/state"
+        state.mkdir(parents=True)
+        database = state / "scheduled_queries.sqlite3"
+        retained = self.root / "retained"
+        retained.write_bytes(b"operator bytes")
+        for suffix in ("", "-wal", "-shm", "-journal"):
+            path = Path(str(database) + suffix)
+            path.symlink_to(retained)
+            with (
+                self.subTest(suffix=suffix),
+                patch.object(deployment, "run", return_value=""),
+                patch.object(deployment.sqlite3, "connect") as connect,
+            ):
+                with self.assertRaises(deployment.DeploymentError):
+                    deployment.reset_scheduler()
+                connect.assert_not_called()
+            self.assertEqual(retained.read_bytes(), b"operator bytes")
+            path.unlink()
+
+    def test_reset_refuses_busy_writer_and_preserves_pending_rows(self):
+        _path, connection = self.scheduler_database()
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            with patch.object(deployment, "run", return_value=""):
+                with self.assertRaisesRegex(deployment.DeploymentError, "busy"):
+                    deployment.reset_scheduler()
+        finally:
+            connection.rollback()
+        self.assertEqual(connection.execute("SELECT COUNT(*) FROM event_tracker").fetchone()[0], 4)
+
+    def test_reset_refuses_trigger_that_could_delete_unrelated_state(self):
+        _path, connection = self.scheduler_database()
+        connection.execute(
+            "CREATE TRIGGER unexpected_delete AFTER DELETE ON event_tracker "
+            "BEGIN DELETE FROM alert_deliveries; END"
+        )
+        connection.commit()
+        with patch.object(deployment, "run", return_value=""):
+            with self.assertRaisesRegex(deployment.DeploymentError, "schema"):
+                deployment.reset_scheduler()
+        self.assertEqual(connection.execute("SELECT COUNT(*) FROM event_tracker").fetchone()[0], 4)
+        self.assertEqual(connection.execute("SELECT * FROM alert_deliveries").fetchall(), [("preserved",)])
+
+    def test_reset_shell_refuses_exported_component_before_python(self):
+        # The fake interpreter only records arguments. Even the accepted branch
+        # cannot import deployment code or touch an operator database.
+        fake_environment = self.root / "fake-tools"
+        fake_bin = fake_environment / "bin"
+        fake_bin.mkdir(parents=True)
+        record = self.root / "python-arguments"
+        python = fake_bin / "python"
+        python.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$RESET_TEST_RECORD"\n')
+        python.chmod(0o755)
+        environment = {
+            **os.environ,
+            "VIRTUAL_ENV": str(fake_environment),
+            "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"],
+            "RESET_TEST_RECORD": str(record),
+            "COMPONENT": "",
+        }
+        helper = deployment.ROOT / "scripts/reset-deployment.sh"
+        accepted = subprocess.run(
+            ["bash", str(helper)], env=environment, capture_output=True, text=True,
+        )
+        self.assertEqual(accepted.returncode, 0)
+        self.assertEqual(record.read_text().splitlines()[-1], "reset")
+        record.unlink()
+
+        environment["COMPONENT"] = "shakemap"
+        refused = subprocess.run(
+            ["bash", str(helper)], env=environment, capture_output=True, text=True,
+        )
+        self.assertEqual(refused.returncode, 2)
+        self.assertFalse(record.exists())
+
+    def test_reset_missing_database_creates_no_runtime_state(self):
+        before = sorted(self.runtime.rglob("*"))
+        with (
+            patch.object(deployment, "run", return_value=""),
+            patch.object(deployment.sqlite3, "connect") as connect,
+        ):
+            deployment.reset_scheduler()
+            connect.assert_not_called()
+        self.assertEqual(sorted(self.runtime.rglob("*")), before)
 
     def test_literal_repository_paths_and_consolidated_runtime_are_supported(self):
         self.assertEqual(deployment.load_settings(self.config), self.settings)

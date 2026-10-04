@@ -8,6 +8,8 @@ import math
 import os
 from pathlib import Path
 import re
+import sqlite3
+import stat
 import subprocess
 import sys
 from urllib.error import HTTPError, URLError
@@ -321,7 +323,101 @@ def preflight(settings):
     print("Host preflight passed. Caller-network reachability, UID write access, installed adapter modules, and native/regional execution remain separate checks.")
 
 
+
+def reset_scheduler():
+    """Clear only scheduled rows after proving the canonical caller is stopped."""
+    names = run(
+        ["docker", "container", "ls", "--all", "--filter",
+         "name=^/pyfinder-docker$", "--format", "{{.Names}}"],
+        cwd=ROOT,
+        capture=True,
+    ).splitlines()
+    if names:
+        if names != ["pyfinder-docker"]:
+            raise DeploymentError("Caller inventory is ambiguous; scheduler state was preserved")
+        state = inspect("container", "pyfinder-docker").get("State")
+        if (
+            not isinstance(state, dict)
+            or state.get("Running") is not False
+            or state.get("Restarting") is not False
+            or state.get("Status") not in {"created", "exited", "dead"}
+        ):
+            raise DeploymentError(
+                "Canonical caller must be stopped before reset; scheduler state was preserved"
+            )
+
+    database = PYFINDER_RUNTIME / "pyfinder/state/scheduled_queries.sqlite3"
+    if database.resolve() != database:
+        raise DeploymentError("Scheduler database path uses a symlink; state was preserved")
+
+    # SQLite owns its journals. Check only this database and its real sidecars;
+    # never remove a whole state directory or unlink files to reset the queue.
+    present = []
+    for path in [database, *(Path(str(database) + suffix)
+                             for suffix in ("-wal", "-shm", "-journal"))]:
+        try:
+            metadata = path.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            raise DeploymentError("Scheduler path cannot be inspected; state was preserved") from error
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise DeploymentError(
+                "Scheduler database or sidecar is redirected or not a regular private file; state was preserved"
+            )
+        present.append(path)
+    if database not in present:
+        if present:
+            raise DeploymentError("Scheduler sidecars exist without their database; state was preserved")
+        print("No scheduler database exists; nothing was reset.")
+        return
+
+    # The same file also holds alert deliveries and ShakeMap evidence. A single
+    # table deletion preserves those records and lets SQLite handle valid WAL
+    # state atomically. A busy writer or unfamiliar schema is a refusal, not a
+    # reason to recreate the database.
+    connection = None
+    try:
+        connection = sqlite3.connect(database.as_uri() + "?mode=rw", uri=True, timeout=0)
+        connection.execute("BEGIN IMMEDIATE")
+        table = connection.execute(
+            "SELECT type FROM sqlite_master WHERE name='event_tracker'"
+        ).fetchone()
+        columns = connection.execute("PRAGMA table_info(event_tracker)").fetchall()
+        primary_key = [row[1] for row in sorted(columns, key=lambda row: row[5]) if row[5]]
+        triggers = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='event_tracker'"
+        ).fetchall()
+        if (
+            table != ("table",)
+            or primary_key != ["event_id", "service", "current_delay_time"]
+            or not {"status", "next_query_time"}.issubset({row[1] for row in columns})
+            or triggers
+        ):
+            raise DeploymentError("Scheduler schema is unfamiliar; state was preserved")
+        count = connection.execute("SELECT COUNT(*) FROM event_tracker").fetchone()[0]
+        connection.execute("DELETE FROM event_tracker")
+        connection.commit()
+    except sqlite3.Error as error:
+        raise DeploymentError(
+            "Scheduler database is busy or unreadable; reset was not committed"
+        ) from error
+    finally:
+        if connection is not None:
+            connection.close()
+
+    print(f"Reset {count} local scheduled rows; other database records and runtime files were preserved.")
+    print("Already accepted ShakeMap jobs may finish and be observed; pending mail remains. Neither was cancelled.")
+
+
 def dispatch(args):
+    if args.action == "reset":
+        if args.component is not None:
+            raise DeploymentError("reset clears only PyFinder scheduled rows; omit --component")
+        if args.config != ROOT / "deployment.env":
+            raise DeploymentError("reset uses this checkout's scheduler database; omit --config")
+        reset_scheduler()
+        return
     if args.action == "check":
         # Import only the small diagnostic helper. Scientific application
         # startup, log handlers and database owners are never constructed here.
@@ -393,7 +489,7 @@ def main():
             "make verify-native for these explicit workflows."
         ),
     )
-    parser.add_argument("action", choices=("setup", "build", "data", "finalize", "start", "stop", "status", "check", "verify"))
+    parser.add_argument("action", choices=("setup", "build", "data", "finalize", "start", "stop", "status", "check", "verify", "reset"))
     parser.add_argument("--config", type=Path, default=ROOT / "deployment.env")
     parser.add_argument("--component", choices=("pyfinder", "shakemap"))
     parser.add_argument("--data-action", choices=("inspect", "validate", "provision", "stage"))
