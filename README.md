@@ -176,8 +176,12 @@ been created; it does not replace these pre-activation checks.
 Use a new absolute evidence directory outside runtime for each caller probe. The
 helper refuses an existing `pyfinder-docker`, pins the image identity, uses the
 canonical parent mount and UID/GID, and does not mount application source to hide
-packaging defects. Preserve any existing caller's necessary container-only files
-before a deliberate removal; verification does not perform that removal for you.
+packaging defects. It reports the installed package versions, module origins and
+image identity while checking the required interfaces. It does not compare those
+files with an uncommitted checkout or establish that an image contains the latest
+source changes. Rebuild intentionally when deploying changes. Preserve any
+existing caller's necessary container-only files before a deliberate removal;
+verification does not perform that removal for you.
 The ordinary caller probe does not run the production listener, FinDer, provider
 queries or email delivery.
 

@@ -2,6 +2,7 @@
 
 import ast
 from copy import deepcopy
+import importlib
 import json
 from pathlib import Path
 import subprocess
@@ -33,10 +34,9 @@ class CallerBoundaryTests(unittest.TestCase):
         self.inputs = self.runtime / "shakemap/data/inputs"
         self.inputs.mkdir(parents=True)
         self.source = self.root / "source"
-        for name in probe.MODULES:
-            path = self.source / "pyfinder" / (name.replace(".", "/") + ".py")
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("# distinct installed-source fixture: " + name)
+        # An installed-image check does not need checkout Python files. Keeping
+        # this directory empty catches accidental reads of local application code.
+        self.source.mkdir()
         runtime_patch = patch.object(probe.deployment, "PYFINDER_RUNTIME", self.runtime)
         runtime_patch.start()
         self.addCleanup(runtime_patch.stop)
@@ -95,7 +95,10 @@ class CallerBoundaryTests(unittest.TestCase):
             raise subprocess.TimeoutExpired(arguments, options["timeout"])
         if self.behavior == "failure":
             return result("finite failure", 9)
-        returned = {"module_hashes": context["module_hashes"]}
+        returned = {"installed_modules": {
+            name: "/installed/site-packages/pyfinder/" + name.replace(".", "/") + ".py"
+            for name in context["modules"]
+        }}
         if "calculation_fixture" in context:
             returned["calculation"] = self.calculation
         return result("PYFINDER_CALLER_PROBE=" + json.dumps(returned))
@@ -117,11 +120,45 @@ class CallerBoundaryTests(unittest.TestCase):
         self.assertNotIn(str(self.source), arguments)
         self.assertEqual(options["timeout"], 120)
         self.assertEqual(options["env"]["PYFINDER_SHAKEMAP_ENABLED"], "false")
-        self.assertEqual(set(result["module_hashes"]), set(probe.MODULES))
+        self.assertEqual(set(result["installed_modules"]), set(probe.MODULES))
         self.assertTrue(result["host_shared_bytes_verified"])
         self.assertEqual(list(self.inputs.iterdir()), [])
         self.assertTrue(json.loads((self.evidence / "summary.json").read_text())["passed"])
         self.assertEqual(self.evidence.stat().st_mode & 0o777, 0o700)
+
+    def test_installed_probe_needs_no_checkout_python_sources(self):
+        self.assertEqual(list(self.source.iterdir()), [])
+        result = self.verify()
+        self.assertEqual(set(result["installed_modules"]), set(probe.MODULES))
+        self.assertEqual(list(self.source.iterdir()), [])
+
+    def installed_origins(self, package, names, modules):
+        # Execute the actual small import guard embedded in the container probe,
+        # with imported modules supplied by a confined test double.
+        function = next(node for node in ast.parse(probe.CONTAINER_PROBE).body
+                        if isinstance(node, ast.FunctionDef) and node.name == "installed_module_origins")
+        namespace = {"Path": Path, "importlib": importlib}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), "container-probe", "exec"), namespace)
+        with patch.object(importlib, "import_module", side_effect=modules):
+            return namespace["installed_module_origins"](package, names)
+
+    def test_import_guard_accepts_installed_modules_and_reports_origins(self):
+        package = self.root / "site-packages/pyfinder"
+        source = package / "cli.py"
+        result = self.installed_origins(package, ["cli"], [SimpleNamespace(__file__=str(source))])
+        self.assertEqual(result, {"cli": str(source)})
+
+    def test_import_guard_rejects_source_overlay_and_escaped_module(self):
+        package = self.root / "site-packages/pyfinder"
+        with self.assertRaisesRegex(AssertionError, "not normally installed"):
+            self.installed_origins(self.source / "pyfinder", ["cli"], [])
+        with self.assertRaisesRegex(AssertionError, "outside installed package"):
+            self.installed_origins(package, ["cli"], [SimpleNamespace(__file__=str(self.source / "cli.py"))])
+
+    def test_missing_installed_capability_fails_without_checkout_fallback(self):
+        package = self.root / "site-packages/pyfinder"
+        with self.assertRaises(ModuleNotFoundError):
+            self.installed_origins(package, ["cli"], ModuleNotFoundError("missing installed module"))
 
     def test_canonical_collision_never_launches_or_creates_evidence(self):
         self.exists = True
@@ -202,8 +239,6 @@ class CallerBoundaryTests(unittest.TestCase):
     def prepare_native(self):
         from test_calculation_fixture import FIXTURE, EVENT_ID
         (self.runtime / "pyfinder/playbacks").mkdir(parents=True)
-        for name in ("finderutils", "eventcontext"):
-            (self.source / "pyfinder" / (name + ".py")).write_text("# fixture source")
         return deepcopy(FIXTURE), EVENT_ID
 
     def test_explicit_native_mode_reuses_single_mount_and_preserves_expected_failure(self):
@@ -219,7 +254,7 @@ class CallerBoundaryTests(unittest.TestCase):
         self.assertEqual(self.context["calculation_fixture"]["configuration"], "france")
         self.assertIn("/pyfinder/playbacks/" + event_id + "/", self.context["calculation_workspace"])
         self.assertEqual(result["calculation"]["outcome"], "FAILED")
-        self.assertEqual(len(result["module_hashes"]), len(probe.MODULES) + 2)
+        self.assertEqual(len(result["installed_modules"]), len(probe.MODULES) + 2)
 
     def test_harness_failure_never_passes_expected_native_failure(self):
         fixture, event_id = self.prepare_native()

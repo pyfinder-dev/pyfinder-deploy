@@ -39,7 +39,7 @@ class CalculationFixtureTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name).resolve()
         # Host tests read the sibling checkout; the real probe imports only the
-        # installed image and separately checks its source hashes and origins.
+        # installed image and checks its module origins and required interfaces.
         project = str(SCRIPTS.parents[1] / "pyfinder")
         sys.path.insert(0, project)
         self.addCleanup(lambda: sys.path.remove(project))

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-from hashlib import sha256
 import json
 import os
 from pathlib import Path
@@ -43,8 +42,20 @@ import platform
 import re
 import tempfile
 import sqlite3
-from hashlib import sha256
 from unittest.mock import patch
+
+
+def installed_module_origins(package, names):
+    """Require normal installed imports and report the code actually exercised."""
+    assert "site-packages" in package.parts, "application not normally installed"
+    origins = {}
+    for name in names:
+        module = importlib.import_module("pyfinder." + name)
+        source = Path(module.__file__).resolve()
+        assert source.is_relative_to(package), "module outside installed package"
+        origins[name] = str(source)
+    return origins
+
 
 assert (os.geteuid(), os.getegid()) == (1000, 1000), "wrong runtime identity"
 assert platform.python_version() == context["python_version"], "wrong Python version"
@@ -71,14 +82,7 @@ with tempfile.TemporaryDirectory(prefix="pyfinder-boundary-") as temporary:
          patch("smtplib.SMTP", side_effect=AssertionError("SMTP forbidden")):
         import pyfinder
         package = Path(pyfinder.__file__).resolve().parent
-        assert "site-packages" in package.parts, "application not normally installed"
-        hashes = {}
-        for name, expected in context["module_hashes"].items():
-            module = importlib.import_module("pyfinder." + name)
-            source = Path(module.__file__).resolve()
-            assert source.is_relative_to(package), "module outside installed package"
-            hashes[name] = sha256(source.read_bytes()).hexdigest()
-            assert hashes[name] == expected, "installed module differs: " + name
+        origins = installed_module_origins(package, context["modules"])
 
         from pyfinder.pyfinderconfig import pyfinderconfig
         from pyfinder.services.shakemap_settings import continuous_shakemap_configuration
@@ -125,7 +129,7 @@ with tempfile.TemporaryDirectory(prefix="pyfinder-boundary-") as temporary:
             "python_version": platform.python_version(), "versions": versions,
             "paramws_commit": build["paramws"]["commit"], "base_image": build["base_image"],
             "installed_package": str(package), "installed_paramws": str(paramws_root),
-            "module_hashes": hashes,
+            "installed_modules": origins,
             "selected_configuration": settings["configuration"],
             "health": health, "configuration_listed": True,
             "shared_input_read_write": True, "integration_enabled": False,
@@ -223,28 +227,27 @@ def verify(settings, evidence, *, fixture=None, event_id=None, expected_outcome=
     if present():
         raise deployment.DeploymentError("Canonical pyfinder-docker exists; preserve it and arrange explicit replacement first")
     image_id, python_version = image_context()
-    source = deployment.component_root(settings, "pyfinder") / "pyfinder"
-    hashes = {name: sha256((source / (name.replace(".", "/") + ".py")).read_bytes()).hexdigest()
-              for name in MODULES}
+    # Probe the installed image's capabilities. Local uncommitted edits do not
+    # define an operator's installed release and must not gate verification.
+    modules = list(MODULES)
 
     evidence.mkdir(mode=0o700)
     nonce = uuid4().hex
     host_marker = inputs / (".pyfinder-boundary-" + nonce + "-host")
     caller_marker = inputs / (".pyfinder-boundary-" + nonce + "-caller")
     cidfile = evidence / "container.cid"
-    context = {"python_version": python_version, "module_hashes": hashes,
+    context = {"python_version": python_version, "modules": modules,
                "nonce": nonce, "host_marker": host_marker.name,
                "caller_marker": caller_marker.name}
     if fixture is not None:
-        for name in ("finderutils", "eventcontext"):
-            hashes[name] = sha256((source / (name + ".py")).read_bytes()).hexdigest()
+        modules.extend(("finderutils", "eventcontext"))
         context.update(
             calculation_fixture=fixture, event_id=event_id,
             host_service=str(runtime / "shakemap"),
             calculation_workspace=f"/home/sysop/runtime/pyfinder/playbacks/{event_id}/shakemap-verification",
         )
     # JSON is embedded as a Python string literal, never as shell code or an
-    # application source mount. Only hashes/context and verification code travel.
+    # application source mount. Only probe context and verification code travel.
     fixture_code = ""
     if fixture is not None:
         fixture_code = Path(calculation_fixture.__file__).read_text() + "\n"
