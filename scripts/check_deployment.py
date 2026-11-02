@@ -199,15 +199,21 @@ def build_report(deployment, config_path):
             caller = caller_settings(deployment, settings)
             warnings.extend(caller.get("warnings", []))
             catalog = caller.get("settings", {}).get("regional_configurations", {})
+            supported_catalog = isinstance(catalog, dict) and all(
+                isinstance(region, dict)
+                and isinstance(region.get("configuration"), str)
+                and isinstance(region.get("wkt"), str)
+                for region in catalog.values()
+            )
             if caller["status"] == "ready" and (
-                not isinstance(catalog, dict) or not catalog
+                not supported_catalog or not catalog
             ):
                 raise ValueError("caller routing catalog unavailable")
 
             # A blocked caller report is authoritative even when validation
             # stopped before it could describe routing. Preserve its corrective
             # finding instead of calling a working checker "unavailable".
-            if not isinstance(catalog, dict):
+            if not supported_catalog:
                 catalog = {}
 
             add(
@@ -224,6 +230,7 @@ def build_report(deployment, config_path):
                 component_report=caller,
             )
         except (OSError, ValueError, subprocess.SubprocessError):
+            catalog = {}
             add("pyfinder", "source_settings", "unverified", "The component settings checker is unavailable",
                 "Install the configured PyFinder host dependencies/check interface and rerun make check")
     else:
@@ -247,7 +254,10 @@ def build_report(deployment, config_path):
         key="PYFINDER_ALERT_CONFIG",
     )
 
-    requested = list(dict.fromkeys(catalog.values()))
+    requested = list(dict.fromkeys(
+        region["configuration"]
+        for region in catalog.values()
+    ))
     if "SHAKEMAP_PORT" not in invalid:
         base_url = "http://127.0.0.1:" + settings["SHAKEMAP_PORT"]
         try:
@@ -373,7 +383,13 @@ def format_report(report):
 
     profiles = report.get("configurations", {})
     catalog = report.get("regional_configurations", {})
-    lines.append("\nRegional routing: " + (", ".join(f"{country} -> {name}" for country, name in sorted(catalog.items())) or "unverified"))
+    lines.append("\nRegional routing: " + (
+        ", ".join(
+            f"{label} ({region['wkt']}) -> {region['configuration']}"
+            for label, region in sorted(catalog.items())
+        )
+        or "unverified"
+    ))
     lines.append("Configurations (per-profile static capability):")
     lines.append("  " + "; ".join(f"{name}: {profile['status'].upper()}"
                                   for name, profile in profiles.items()) if profiles

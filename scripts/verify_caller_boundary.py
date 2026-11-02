@@ -103,13 +103,16 @@ with tempfile.TemporaryDirectory(prefix="pyfinder-boundary-") as temporary:
         assert health["ready"] is True, "service not ready"
         configurations = client.configurations()
 
-        # A missing mapped profile is capability evidence, not a connectivity
-        # failure or permission to skip the eventual regional calculation.
+        # This installed geometry check is separate from service inventory.
+        # A missing native profile must not skip its eventual regional request.
         from pyfinder.utils.regionlocator import RegionLocator
-        assert RegionLocator().get_region(46.8, 8.2) == "ch", (
-            "installed country lookup failed"
-        )
         catalog = settings["regional-configurations"]
+        probe_configuration = RegionLocator(catalog).get_configuration(46.8, 8.2)
+        assert probe_configuration in (
+            {region["configuration"] for region in catalog.values()} | {"global"}
+        ), (
+            "installed region selector returned an unconfigured profile"
+        )
         assert isinstance(configurations["configurations"], list), (
             "invalid configuration inventory"
         )
@@ -135,8 +138,10 @@ with tempfile.TemporaryDirectory(prefix="pyfinder-boundary-") as temporary:
             "installed_package": str(package), "installed_paramws": str(paramws_root),
             "installed_modules": origins,
             "regional_configurations": catalog,
+            "probe_configuration": probe_configuration,
             "missing_configurations": sorted(
-                set(catalog.values()) - set(configurations["configurations"])
+                {region["configuration"] for region in catalog.values()}
+                - set(configurations["configurations"])
             ),
             "health": health, "configuration_listed": True,
             "shared_input_read_write": True, "integration_enabled": False,

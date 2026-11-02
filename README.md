@@ -8,7 +8,7 @@ set of thin aliases.
 
 ## Prerequisites and layout
 
-Provide Docker, Bash, Make and a project Python environment using Python 3.12 or
+Provide Docker, Bash, Make, Git and a project Python environment using Python 3.12 or
 newer, with the component host dependencies installed. This is PyFinder's minimum;
 the standalone ShakeMap service package permits Python 3.10, which is insufficient
 for the combined project checks. The helpers do not install these prerequisites,
@@ -31,17 +31,27 @@ workspace/
         └── shakemap/
 ```
 
-Install the ShakeMap host package in that environment so its `shake-in-docker`
-command is available to the service helpers:
+Install the host packages and check dependencies in that environment. PyFinder's
+offline checks import its actual manager and declared scientific dependencies;
+installing only the ShakeMap client is insufficient:
 
 ```sh
 # From pyfinder-deploy, use the existing project environment.
+set -e
 source ../.venv/bin/activate
-python -m pip install -e ../shakemap-docker
+python -m pip install \
+  'paramws-clients @ git+https://github.com/pyfinder-dev/paramws-clients.git@master'
+python -m pip install -e ../pyfinder
+(cd ../shakemap-docker && python -m pip install -r requirements.txt)
 ```
 
-This installs the host REST client and helper dependencies, not the native FinDer
-executable. FinDer runs only inside its required container image.
+The ParamWS command uses the same official `master` source as PyFinder's Dockerfile
+and does not modify any local ParamWS checkout. PyFinder is installed editable
+with its declared dependencies. ShakeMap's existing `requirements.txt` installs
+its editable host package, the `shake-in-docker` client and its host-check
+dependencies. These packages support offline checks and host helpers. Run FinDer
+workflows through `../pyfinder/scripts/pyfinder`, which invokes the required
+container; host package installation does not install the FinDer executable.
 
 The canonical images are `pyfinder:dev` and `shakemap-docker:latest`; their container
 names are `pyfinder-docker` and `shakemap-docker`. PyFinder retains the required
@@ -84,12 +94,24 @@ mapping or infer container connectivity from a successful host request. Keep
 `PYFINDER_SHAKEMAP_ENABLED=false` until verification is complete.
 
 PyFinder selects each initial profile from its nonempty `regional-configurations`
-country-to-service-name catalog in the installed application image. It uses the
-selected FinDer solution's coordinates, matching `event.xml`; its catalog remains
-independent of FinDer computational profiles. Offshore/unmapped locations and
-ambiguous shared-country borders use `global`. Service discovery does not skip
-an unavailable mapped region. The service executes the explicit selection and
-never infers a region or substitutes another profile.
+geometry catalog in the installed application image. Region labels are human
+identifiers; each entry declares a WKT coverage resource and service profile.
+Coverage may cross borders or split any area, and several regions can share a
+profile. FinDer's computational catalog remains independent. Selection uses the
+selected solution location, matching `event.xml`.
+
+Uncovered locations use global. Matching regions with a single shared profile
+select it once, including their common borders; different matching profiles warn
+and use global. A missing/unusable optional WKT logs the affected resource and
+uses global for that calculation without terminating services. The default seeds
+and [coverage authoring guide](../pyfinder/docs/shakemap-region-coverage.md)
+are separate from service-owned native scientific assets. Caller WKT changes
+require rebuilding/redeploying the caller. Native files may be supplied later;
+these helpers never silently repair operator profiles or turn file absence into
+an installation prerequisite.
+
+Service discovery does not skip a mapped native profile. The service executes
+the explicit selection and never infers a region or substitutes another profile.
 PyFinder can retain a confirmed regional configuration failure and submit once
 more explicitly with `global`, using the same public calculation ID and a new
 native sequence. Uncertain acceptance, read failures and unrelated native failures
@@ -184,7 +206,7 @@ resolved asset paths where available. Fix the reported setting or resource using
 the named component helper; the check never repairs scientific profiles. Global and every profile referenced by PyFinder's routing catalog are assessed
 independently. Each contributes to the deployment report; a blocked regional
 profile with statically usable global recovery remains conditional/unverified,
-not silently usable. Native country qualification remains a separate check.
+not silently usable. Native regional scientific qualification remains a separate check.
 
 `usable` means the inspected static capability has no known blocker. `degraded`
 means a known limited capability remains usable. `blocked` identifies a confirmed

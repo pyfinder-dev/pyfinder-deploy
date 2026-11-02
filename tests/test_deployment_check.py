@@ -62,7 +62,21 @@ class CheckTests(unittest.TestCase):
         self.inspection = self.start(patch.object(deployment, "inspect", side_effect=self.inspect))
         self.http = self.start(patch.object(deployment, "get_json", side_effect=self.get_json))
         self.caller_check = self.start(patch.object(checks, "caller_settings", return_value={
-            "status": "ready", "checks": [], "settings": {"regional_configurations": {"it": "italy", "ch": "switzerland"}}, "fallback": {},
+            "status": "ready",
+            "checks": [],
+            "settings": {
+                "regional_configurations": {
+                    "Italian area": {
+                        "wkt": "italy.wkt",
+                        "configuration": "italy",
+                    },
+                    "Swiss area": {
+                        "wkt": "switzerland.wkt",
+                        "configuration": "switzerland",
+                    },
+                },
+            },
+            "fallback": {},
         }))
         self.profile_status = {}
         self.typed_diagnostics = True
@@ -134,6 +148,33 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(caller["status"], "blocked")
         self.assertIn("nonempty mapping", checks.format_report(report))
         self.assertEqual(report["regional_configurations"], {})
+
+    def test_old_flat_catalog_is_unknown_without_crashing_or_losing_blocked_reason(self):
+        for status, expected in (("ready", "unverified"), ("blocked", "blocked")):
+            with self.subTest(status=status):
+                self.caller_check.return_value = {
+                    "status": status,
+                    "settings": {"regional_configurations": {"ch": "switzerland"}},
+                    "checks": [{"reason": "Caller integration is disabled"}],
+                }
+                report = self.report()
+                self.assertEqual(report["status"], expected)
+                self.assertEqual(report["regional_configurations"], {})
+                if status == "blocked":
+                    self.assertIn("Caller integration is disabled", checks.format_report(report))
+
+    def test_shared_profile_regions_are_assessed_once_and_shown_by_label(self):
+        catalog = {
+            "CH + IT + Germany": {"wkt": "shared.wkt", "configuration": "combined"},
+            "Another separate area": {"wkt": "separate.wkt", "configuration": "combined"},
+        }
+        self.caller_check.return_value["settings"]["regional_configurations"] = catalog
+        report = self.report()
+        self.assertEqual(report["status"], "usable")
+        self.assertEqual(set(report["configurations"]), {"global", "combined"})
+        calls = [call.args[0] for call in self.http.call_args_list]
+        self.assertEqual(sum(url.endswith("/combined/check") for url in calls), 1)
+        self.assertIn("CH + IT + Germany (shared.wkt) -> combined", checks.format_report(report))
 
     def test_obsolete_settings_warn_without_changing_required_assessment(self):
         self.config.write_text(
