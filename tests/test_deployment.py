@@ -44,7 +44,6 @@ class DeploymentTests(unittest.TestCase):
             "PYFINDER_SHAKEMAP_ENABLED": "false",
             "PYFINDER_SHAKEMAP_URL": "",
             "PYFINDER_SHAKEMAP_INPUT_DIRECTORY": deployment.INPUT_TARGET,
-            "PYFINDER_SHAKEMAP_CONFIGURATION": "global",
             "PYFINDER_SHAKEMAP_REQUEST_TIMEOUT_SECONDS": "30",
             "PYFINDER_SHAKEMAP_OVERWRITE": "true",
         }
@@ -257,11 +256,49 @@ class DeploymentTests(unittest.TestCase):
         marker = self.root / "injected"
         for value in (f"$(touch {marker})", f"`touch {marker}`", "global;touch BAD", "global | cat"):
             with self.subTest(value=value):
-                self.settings["PYFINDER_SHAKEMAP_CONFIGURATION"] = value
+                self.settings["PYFINDER_SHAKEMAP_URL"] = value
                 self.write_config()
                 with self.assertRaises(deployment.DeploymentError):
                     deployment.load_settings(self.config)
                 self.assertFalse(marker.exists())
+
+    def test_obsolete_saved_and_exported_selector_warn_without_changing_settings(self):
+        marker = self.root / "must-not-be-created"
+        self.config.write_text(
+            self.config.read_text()
+            + "PYFINDER_SHAKEMAP_CONFIGURATION=private-obsolete-value\n"
+            + f"PYFINDER_SHAKEMAP_CONFIGURATION=$(touch {marker})\n"
+        )
+        warnings = []
+        with patch.dict(os.environ, {
+            "PYFINDER_SHAKEMAP_CONFIGURATION": "private-obsolete-value",
+        }):
+            settings = deployment.read_settings(
+                self.config,
+                warning_handler=warnings.append,
+            )
+            self.assertEqual(settings, self.settings)
+            self.assertNotIn(
+                "PYFINDER_SHAKEMAP_CONFIGURATION",
+                deployment.environment(settings),
+            )
+        self.assertEqual(len(warnings), 2)
+        self.assertIn("Environment", warnings[0])
+        self.assertIn("Saved", warnings[1])
+        self.assertNotIn("private-obsolete-value", " ".join(warnings))
+        self.assertFalse(marker.exists())
+
+        with patch("sys.stderr") as stderr:
+            self.assertEqual(deployment.load_settings(self.config), self.settings)
+        self.assertTrue(stderr.write.called)
+
+        self.config.write_text(
+            self.config.read_text().replace("SHAKEMAP_PORT=9010", "SHAKEMAP_PORT=invalid")
+        )
+        with patch("sys.stderr"), self.assertRaisesRegex(
+            deployment.DeploymentError, "SHAKEMAP_PORT",
+        ):
+            deployment.load_settings(self.config)
 
     def test_unknown_duplicate_and_missing_keys_are_rejected(self):
         original = self.config.read_text()

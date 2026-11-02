@@ -24,7 +24,6 @@ APPLICATION_KEYS = (
     "PYFINDER_SHAKEMAP_ENABLED",
     "PYFINDER_SHAKEMAP_URL",
     "PYFINDER_SHAKEMAP_INPUT_DIRECTORY",
-    "PYFINDER_SHAKEMAP_CONFIGURATION",
     "PYFINDER_SHAKEMAP_REQUEST_TIMEOUT_SECONDS",
     "PYFINDER_SHAKEMAP_OVERWRITE",
 )
@@ -52,22 +51,53 @@ def absolute_directory(value, name, *, required=True):
     return path
 
 
-def read_settings(path):
+def read_settings(path, *, warning_handler=None):
     """Read literal values without interpreting shell quotes or substitutions."""
     try:
         contents = path.read_text(encoding="utf-8")
     except OSError as exc:
         raise DeploymentError("Local configuration cannot be read; run setup or supply --config") from exc
 
+    # Console helpers emit safe messages directly; the read-only checker
+    # collects them for both its JSON and human reports instead.
+    warn = warning_handler or (
+        lambda message: print("warning: " + message, file=sys.stderr)
+    )
+    if "PYFINDER_SHAKEMAP_CONFIGURATION" in os.environ:
+        warn(
+            "Environment PYFINDER_SHAKEMAP_CONFIGURATION is obsolete and ignored; "
+            "unset it and use PyFinder regional-configurations"
+        )
+
     settings = {}
+    warned_saved_selector = False
     for number, line in enumerate(contents.splitlines(), 1):
         if not line.strip() or line.lstrip().startswith("#"):
             continue
         key, separator, value = line.partition("=")
+        if separator and key == "PYFINDER_SHAKEMAP_CONFIGURATION":
+            if not warned_saved_selector:
+                warn(
+                    "Saved PYFINDER_SHAKEMAP_CONFIGURATION is obsolete and ignored; "
+                    "remove it from deployment.env and use PyFinder regional-configurations"
+                )
+                warned_saved_selector = True
+            continue
+
         if not separator or key not in KEYS | OPTIONAL_KEYS or key in settings:
-            raise DeploymentError(f"Configuration line {number}: unknown, duplicate, or malformed setting")
-        if any(character in value for character in "$`;|&<>\x00\r\n") or value != value.strip():
-            raise DeploymentError(f"Configuration line {number}: use a literal value without shell syntax or edge whitespace")
+            raise DeploymentError(
+                f"Configuration line {number}: unknown, duplicate, or malformed setting"
+            )
+
+        if (
+            any(character in value for character in "$`;|&<>\x00\r\n")
+            or value != value.strip()
+        ):
+            raise DeploymentError(
+                f"Configuration line {number}: use a literal value without "
+                "shell syntax or edge whitespace"
+            )
+
         settings[key] = value
 
     return settings
@@ -128,9 +158,6 @@ def settings_problems(settings):
             timeout = math.nan
         if not math.isfinite(timeout) or timeout <= 0:
             problems.append((key, "use a positive finite number"))
-    key = "PYFINDER_SHAKEMAP_CONFIGURATION"
-    if key in settings and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", settings[key]):
-        problems.append((key, "use an explicit service configuration name"))
     key = "PYFINDER_SHAKEMAP_INPUT_DIRECTORY"
     if key in settings and settings[key] != INPUT_TARGET:
         problems.append((key, "retain the documented canonical container input path"))
@@ -194,6 +221,9 @@ def environment(settings):
     # Configuration is complete and authoritative. An unrelated shell variable
     # must not quietly enable integration or replace a reviewed endpoint.
     result = os.environ.copy()
+    # The warning belongs to settings consumption. Never pass the ignored
+    # value into a component process or a newly created caller container.
+    result.pop("PYFINDER_SHAKEMAP_CONFIGURATION", None)
     for key in APPLICATION_KEYS:
         result[key] = settings[key]
     result.pop("PYFINDER_SHAKEMAP_INPUT_HOST_DIRECTORY", None)
@@ -292,14 +322,13 @@ def preflight(settings):
     for name in ("state", "logs", "runs", "playbacks"):
         absolute_directory(str(PYFINDER_RUNTIME / "pyfinder" / name), "PyFinder runtime")
 
-    selected = settings["PYFINDER_SHAKEMAP_CONFIGURATION"]
     host_url = f"http://127.0.0.1:{settings['SHAKEMAP_PORT']}"
     health = get_json(host_url + "/healthz")
     configurations = get_json(host_url + "/configurations")
     if not isinstance(health, dict) or health.get("ready") is not True:
         raise DeploymentError("ShakeMap does not report ready; inspect component status and finalization")
-    if not isinstance(configurations, dict) or selected not in configurations.get("configurations", []):
-        raise DeploymentError("The selected ShakeMap configuration is unavailable; no fallback is applied")
+    if not isinstance(configurations, dict) or not isinstance(configurations.get("configurations"), list):
+        raise DeploymentError("ShakeMap configuration inventory is unavailable; no fallback is applied")
 
     for component, image_name, container_name in (
         ("shakemap", "shakemap-docker:latest", "shakemap-docker"),

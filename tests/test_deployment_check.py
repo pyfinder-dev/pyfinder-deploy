@@ -52,7 +52,6 @@ class CheckTests(unittest.TestCase):
             "SHAKEMAP_MAX_CONCURRENT": "10", "PYFINDER_SHAKEMAP_ENABLED": "true",
             "PYFINDER_SHAKEMAP_URL": "http://service.invalid:9010",
             "PYFINDER_SHAKEMAP_INPUT_DIRECTORY": deployment.INPUT_TARGET,
-            "PYFINDER_SHAKEMAP_CONFIGURATION": "global",
             "PYFINDER_SHAKEMAP_REQUEST_TIMEOUT_SECONDS": "30",
             "PYFINDER_SHAKEMAP_OVERWRITE": "true", "PYFINDER_ALERT_CONFIG": "",
         }
@@ -63,7 +62,7 @@ class CheckTests(unittest.TestCase):
         self.inspection = self.start(patch.object(deployment, "inspect", side_effect=self.inspect))
         self.http = self.start(patch.object(deployment, "get_json", side_effect=self.get_json))
         self.caller_check = self.start(patch.object(checks, "caller_settings", return_value={
-            "status": "ready", "checks": [], "settings": {}, "fallback": {},
+            "status": "ready", "checks": [], "settings": {"regional_configurations": {"it": "italy", "ch": "switzerland"}}, "fallback": {},
         }))
         self.profile_status = {}
         self.typed_diagnostics = True
@@ -104,10 +103,10 @@ class CheckTests(unittest.TestCase):
     def report(self):
         return checks.build_report(deployment, self.config)
 
-    def test_selected_global_is_not_blocked_by_unused_regions(self):
+    def test_every_mapped_region_contributes_to_capability(self):
         self.profile_status.update(italy="BLOCKED", switzerland="INCOMPLETE")
         report = self.report()
-        self.assertEqual(report["status"], "usable")
+        self.assertEqual(report["status"], "unverified")
         self.assertEqual(report["configurations"]["italy"]["status"], "blocked")
         self.assertEqual(report["configurations"]["switzerland"]["status"], "unverified")
         self.assertEqual(report["configurations"]["global"]["findings"][0]["resolved_path"], "/data/global/vs30.grd")
@@ -120,8 +119,53 @@ class CheckTests(unittest.TestCase):
         missing = {item.get("key") for item in report["findings"] if item["check"] == "setting"}
         self.assertTrue({"PYFINDER_REPOSITORY", "SHAKEMAP_RUNTIME_ROOT"}.issubset(missing))
         self.assertEqual(len([item for item in report["findings"] if item["check"] == "container"]), 2)
-        self.assertEqual(set(report["configurations"]), {"global", "italy", "switzerland"})
+        self.assertEqual(set(report["configurations"]), {"global"})
         self.caller_check.assert_not_called()
+
+    def test_blocked_caller_validation_preserves_actionable_reason_without_catalog(self):
+        self.caller_check.return_value = {
+            "status": "blocked", "settings": {},
+            "checks": [{"name": "caller_settings", "status": "blocked",
+                        "reason": "shakemap.regional-configurations must be a nonempty mapping"}],
+        }
+        report = self.report()
+        self.assertEqual(report["status"], "blocked")
+        caller = next(item for item in report["findings"] if item["check"] == "source_settings")
+        self.assertEqual(caller["status"], "blocked")
+        self.assertIn("nonempty mapping", checks.format_report(report))
+        self.assertEqual(report["regional_configurations"], {})
+
+    def test_obsolete_settings_warn_without_changing_required_assessment(self):
+        self.config.write_text(
+            self.config.read_text()
+            + "PYFINDER_SHAKEMAP_CONFIGURATION=private-obsolete-value\n"
+        )
+        self.caller_check.return_value["warnings"] = [
+            "shakemap.configuration is obsolete and ignored; remove it",
+        ]
+        with patch.dict("os.environ", {
+            "PYFINDER_SHAKEMAP_CONFIGURATION": "private-obsolete-value",
+        }):
+            report = self.report()
+        self.assertEqual(report["status"], "usable")
+        self.assertEqual(len(report["warnings"]), 3)
+        text = checks.format_report(report)
+        self.assertIn("Warnings (obsolete settings ignored):", text)
+        self.assertIn("Saved PYFINDER_SHAKEMAP_CONFIGURATION", text)
+        self.assertIn("shakemap.configuration is obsolete", text)
+        self.assertNotIn("private-obsolete-value", json.dumps(report) + text)
+        with patch.object(checks, "build_report", return_value=report):
+            with redirect_stdout(io.StringIO()) as output:
+                code = checks.check(deployment, self.config, json_output=True)
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(output.getvalue())["warnings"], report["warnings"])
+        self.assertFalse(any(item["check"] == "setting" for item in report["findings"]))
+        self.assertTrue(any(item["check"] == "queue" for item in report["findings"]))
+        self.assertTrue(any(item["check"] == "image" for item in report["findings"]))
+        self.assertTrue(all(item["status"] == "usable" for item in report["findings"]
+                            if item["check"] in {"wiring", "source_settings", "email_policy"}))
+        self.caller_check.assert_called_once()
+        self.http.assert_called()
 
     def test_old_service_endpoint_is_unverified_without_host_fallback(self):
         def old(url):
@@ -134,19 +178,15 @@ class CheckTests(unittest.TestCase):
         self.assertTrue(all(item["status"] == "unverified" for item in report["configurations"].values()))
 
     def test_regional_recovery_remains_conditional_and_installed_caller_unknown(self):
-        self.settings["PYFINDER_SHAKEMAP_CONFIGURATION"] = "italy"
-        self.write_settings()
         self.profile_status["italy"] = "BLOCKED"
         report = self.report()
         self.assertEqual(report["status"], "unverified")
         self.assertTrue(report["recovery"]["requested_configuration_first"])
         self.assertTrue(report["recovery"]["requires_confirmed_eligible_failure"])
         self.assertEqual(report["recovery"]["installed_caller_behavior"], "unverified")
-        self.assertIn("conditional", report["recovery"]["status"])
+        self.assertIn("conditional", report["recovery"]["profiles"]["italy"])
 
     def test_blocked_global_cannot_support_regional_recovery(self):
-        self.settings["PYFINDER_SHAKEMAP_CONFIGURATION"] = "italy"
-        self.write_settings()
         self.profile_status.update({"italy": "BLOCKED", "global": "BLOCKED"})
         self.assertEqual(self.report()["status"], "blocked")
 
@@ -223,13 +263,11 @@ class CheckTests(unittest.TestCase):
         self.assertIn("Deployment check: BLOCKED", text)
         self.assertIn("Action: Review prerequisites", text)
         self.assertIn("global: USABLE", text)
-        self.assertIn("global is selected", text)
+        self.assertIn("Regional routing:", text)
         self.assertNotIn("image_id", text)
         self.assertNotIn("eligible_failure_codes", text)
 
     def test_profile_text_retains_actionable_locations_and_conditional_recovery(self):
-        self.settings["PYFINDER_SHAKEMAP_CONFIGURATION"] = "italy"
-        self.write_settings()
         report = self.report()
         report["configurations"]["italy"]["findings"] = [{
             "status": "BROKEN", "reason": "Missing module", "config_file": "/profiles/italy/model.conf",

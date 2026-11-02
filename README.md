@@ -73,6 +73,9 @@ must be this deployment checkout's `runtime` directory.
 Settings are literal `KEY=value` lines. Do not use quotes, `export`, inline comments,
 `~`, `$HOME`, `$PWD` or shell substitutions: the parser does not expand them. Paths
 may contain spaces. Unknown, duplicate and missing required settings are rejected.
+The recognized obsolete `PYFINDER_SHAKEMAP_CONFIGURATION` setting is an exception:
+it produces a warning and is ignored, without changing readiness or interrupting
+an otherwise valid operation. Its value is never applied or displayed.
 
 Set `PYFINDER_SHAKEMAP_URL` to an HTTP(S) endpoint reachable **from the caller
 container**. Docker Desktop commonly provides `host.docker.internal`; other Docker
@@ -80,8 +83,13 @@ hosts need an explicitly configured route. These helpers do not add a host-gatew
 mapping or infer container connectivity from a successful host request. Keep
 `PYFINDER_SHAKEMAP_ENABLED=false` until verification is complete.
 
-The selected configuration defaults to `global`. The service always executes the
-explicit selection and never infers a region or substitutes another profile.
+PyFinder selects each initial profile from its nonempty `regional-configurations`
+country-to-service-name catalog in the installed application image. It uses the
+selected FinDer solution's coordinates, matching `event.xml`; its catalog remains
+independent of FinDer computational profiles. Offshore/unmapped locations and
+ambiguous shared-country borders use `global`. Service discovery does not skip
+an unavailable mapped region. The service executes the explicit selection and
+never infers a region or substitutes another profile.
 PyFinder can retain a confirmed regional configuration failure and submit once
 more explicitly with `global`, using the same public calculation ID and a new
 native sequence. Uncertain acceptance, read failures and unrelated native failures
@@ -173,10 +181,10 @@ The default report groups required issues and actions, compact successful checks
 profile findings, conditional fallback and evidence limits. It identifies
 configuration files, setting keys and the service's
 resolved asset paths where available. Fix the reported setting or resource using
-the named component helper; the check never repairs scientific profiles. Global,
-Italy and Switzerland are visible independently. Only the selected configuration
-contributes to the deployment result; a broken unused example does not block a
-selected global configuration.
+the named component helper; the check never repairs scientific profiles. Global and every profile referenced by PyFinder's routing catalog are assessed
+independently. Each contributes to the deployment report; a blocked regional
+profile with statically usable global recovery remains conditional/unverified,
+not silently usable. Native country qualification remains a separate check.
 
 `usable` means the inspected static capability has no known blocker. `degraded`
 means a known limited capability remains usable. `blocked` identifies a confirmed
@@ -318,6 +326,42 @@ make stop COMPONENT=shakemap
 
 Stopping does not delete containers or mounted data. The helpers do not add
 restart supervision or a background host daemon.
+
+## Upgrade the caller
+
+Update PyFinder and this deployment checkout together. Removing the obsolete
+`PYFINDER_SHAKEMAP_CONFIGURATION` line from `deployment.env` and unsetting that
+shell variable is recommended. Helpers warn and ignore either source while
+continuing with valid supported settings; removal is not an activation prerequisite.
+Ordinary helpers print warnings to stderr. `make check` includes deployment and
+caller warnings separately in its human and JSON reports; warnings alone do not
+block or degrade the required checks.
+The new source catalog replaces the old fixed setting. Keep the remaining
+endpoint, input, timeout, enablement, overwrite and email settings.
+
+Before replacing the canonical caller, stop it and inspect `docker diff
+pyfinder-docker`. Preserve any needed container-only files separately; mounted
+runtime data remains in place. Ordinary stop retains the old container, so a
+new image or changed environment requires deliberate removal and recreation:
+
+```sh
+make stop COMPONENT=pyfinder
+# After preserving any required container-only files:
+docker rm pyfinder-docker
+make build COMPONENT=pyfinder
+# Run the preactivation checks described above while the name is absent.
+make verify-image
+# After the finite caller probe and configuration/queue review:
+make start COMPONENT=pyfinder
+make verify
+```
+
+Use the existing `make verify-caller EVIDENCE=...` between image verification and
+continuous startup, with a fresh absolute evidence directory. Do not delete the
+runtime or reset its database for this upgrade. Existing prepared calculations
+keep their original service profile, inputs and overwrite policy after restart.
+Changing the source catalog requires rebuilding and recreating the caller;
+restarting its old container does not install new application settings.
 
 ## Run a real playback
 

@@ -95,22 +95,50 @@ def build_report(deployment, config_path):
     """Collect independent installation facts; never repair or activate them."""
     findings = []
     profiles = {}
+    warnings = []
 
     def add(component, name, status, reason, action, **details):
         findings.append({"component": component, "check": name, "status": status,
                          "reason": reason, "corrective_action": action, **details})
 
+    settings_parsed = True
     try:
-        settings = deployment.read_settings(config_path)
+        settings = deployment.read_settings(
+            config_path,
+            warning_handler=warnings.append,
+        )
     except deployment.DeploymentError as error:
+        settings_parsed = False
         settings = {}
-        add("deployment", "settings", "blocked", str(error),
-            "Create/review the literal settings file using deployment.env.example", config_file=str(config_path))
-    problems = deployment.settings_problems(settings)
-    invalid = {key for key, _reason in problems}
+        add(
+            "deployment",
+            "settings",
+            "blocked",
+            str(error),
+            "Create/review the literal settings file using deployment.env.example",
+            config_file=str(config_path),
+        )
+
+    # A parser refusal says the settings are unknown, not absent. Keep its
+    # actionable migration error without manufacturing a missing-key list from
+    # an empty fallback dictionary. Independent Docker and queue reads continue.
+    problems = deployment.settings_problems(settings) if settings_parsed else []
+    invalid = (
+        {key for key, _reason in problems}
+        if settings_parsed else
+        deployment.KEYS | deployment.OPTIONAL_KEYS
+    )
+
     for key, reason in problems:
-        add("deployment", "setting", "blocked", reason, "Correct this setting; no value was applied",
-            config_file=str(config_path), key=key)
+        add(
+            "deployment",
+            "setting",
+            "blocked",
+            reason,
+            "Correct this setting; no value was applied",
+            config_file=str(config_path),
+            key=key,
+        )
 
     # A failed Docker connection is not proof that either canonical container
     # or image is absent. Settings and service diagnostics still continue.
@@ -165,12 +193,36 @@ def build_report(deployment, config_path):
         "Preserve the queue; explicitly decide how existing pending work should be handled before activation",
         resolved_path=str(queue_path), **queue)
 
+    catalog = {}
     if not invalid:
         try:
             caller = caller_settings(deployment, settings)
-            add("pyfinder", "source_settings", "usable" if caller["status"] == "ready" else "blocked",
-                "PyFinder source settings pass static checks" if caller["status"] == "ready" else "PyFinder settings are incomplete or disabled",
-                "Review the component findings and saved settings", scope="source_configuration", component_report=caller)
+            warnings.extend(caller.get("warnings", []))
+            catalog = caller.get("settings", {}).get("regional_configurations", {})
+            if caller["status"] == "ready" and (
+                not isinstance(catalog, dict) or not catalog
+            ):
+                raise ValueError("caller routing catalog unavailable")
+
+            # A blocked caller report is authoritative even when validation
+            # stopped before it could describe routing. Preserve its corrective
+            # finding instead of calling a working checker "unavailable".
+            if not isinstance(catalog, dict):
+                catalog = {}
+
+            add(
+                "pyfinder",
+                "source_settings",
+                "usable" if caller["status"] == "ready" else "blocked",
+                (
+                    "PyFinder source settings pass static checks"
+                    if caller["status"] == "ready" else
+                    "PyFinder settings are incomplete or disabled"
+                ),
+                "Review the component findings and saved settings",
+                scope="source_configuration",
+                component_report=caller,
+            )
         except (OSError, ValueError, subprocess.SubprocessError):
             add("pyfinder", "source_settings", "unverified", "The component settings checker is unavailable",
                 "Install the configured PyFinder host dependencies/check interface and rerun make check")
@@ -179,12 +231,23 @@ def build_report(deployment, config_path):
             "Correct the reported settings before checking application configuration")
 
     email = settings.get("PYFINDER_ALERT_CONFIG")
-    add("pyfinder", "email_policy", "usable" if email == "" else "unverified",
-        "Email is explicitly disabled" if email == "" else "Email is configured or uses implicit discovery; delivery was not tested",
+    add(
+        "pyfinder",
+        "email_policy",
+        "usable" if email == "" else "unverified",
+        (
+            "Email policy is unknown because deployment settings could not be parsed"
+            if not settings_parsed else
+            "Email is explicitly disabled"
+            if email == "" else
+            "Email is configured or uses implicit discovery; delivery was not tested"
+        ),
         "Set PYFINDER_ALERT_CONFIG empty to disable, or explicitly configure and separately verify delivery",
-        config_file=str(config_path), key="PYFINDER_ALERT_CONFIG")
+        config_file=str(config_path),
+        key="PYFINDER_ALERT_CONFIG",
+    )
 
-    selected = settings.get("PYFINDER_SHAKEMAP_CONFIGURATION")
+    requested = list(dict.fromkeys(catalog.values()))
     if "SHAKEMAP_PORT" not in invalid:
         base_url = "http://127.0.0.1:" + settings["SHAKEMAP_PORT"]
         try:
@@ -198,8 +261,7 @@ def build_report(deployment, config_path):
         except deployment.DeploymentError:
             add("shakemap", "service_health", "unverified", "Service health could not be read",
                 "Inspect the service endpoint and canonical container; no service was started")
-        requested = [] if "PYFINDER_SHAKEMAP_CONFIGURATION" in invalid else [selected]
-        for name in dict.fromkeys(["global", "italy", "switzerland", *requested]):
+        for name in dict.fromkeys(["global", *requested]):
             try:
                 profiles[name] = profile_report(deployment, base_url, name)
             except (deployment.DeploymentError, ValueError, TypeError):
@@ -211,47 +273,84 @@ def build_report(deployment, config_path):
         add("shakemap", "configuration_checks", "unverified", "A valid service port is required for installed checks",
             "Correct SHAKEMAP_PORT; no host-profile substitution was used")
 
-    selected_profile = profiles.get(selected, {"status": "unverified"})
-    selected_status = selected_profile["status"]
-    recovery = "not_needed" if selected == "global" else "unverified"
-    if selected != "global" and selected_status == "blocked":
-        global_profile = profiles.get("global", {})
-        classification = selected_profile.get("capabilities", {}).get("native_configuration_diagnostics") is True
-        if global_profile.get("status") == "usable" and classification:
-            selected_status = "unverified"
-            recovery = "conditional_on_installed_caller"
-        else:
-            selected_status = "blocked" if global_profile.get("status") == "blocked" else "unverified"
-    add("shakemap", "selected_configuration", selected_status,
-        "Requested configuration static assessment; optional unselected profiles do not affect this result",
-        "Review the requested profile's component findings; do not silently select another profile",
-        configuration=selected, recovery=recovery)
+    recovery = {}
+    if not catalog:
+        add(
+            "shakemap",
+            "regional_routing",
+            "unverified",
+            "Caller routing catalog is unavailable",
+            "Use compatible PyFinder and deployment versions; no profile was selected",
+        )
+
+    # Assess every configured profile separately. Keep a possible global
+    # recovery visibly conditional rather than turning static checks green.
+    for name in dict.fromkeys(["global", *requested]):
+        profile = profiles.get(name, {"status": "unverified"})
+        status = profile["status"]
+        recovery[name] = "not_needed" if name == "global" else "unverified"
+        if name != "global" and status == "blocked":
+            global_profile = profiles.get("global", {})
+            classification = profile.get("capabilities", {}).get(
+                "native_configuration_diagnostics"
+            ) is True
+
+            if global_profile.get("status") == "usable" and classification:
+                # A usable global static profile is only a possible recovery:
+                # the installed caller must still attempt the region first.
+                status = "unverified"
+                recovery[name] = "conditional_on_installed_caller"
+            else:
+                status = (
+                    "blocked"
+                    if global_profile.get("status") == "blocked" else
+                    "unverified"
+                )
+
+        add(
+            "shakemap",
+            "routing_configuration",
+            status,
+            "Static capability for configured routing; no event or native execution was selected",
+            "Review profile findings; do not silently skip a regional request",
+            configuration=name,
+            recovery=recovery[name],
+        )
+
     return {
         "scope": "read_only_static", "status": aggregate([item["status"] for item in findings]),
-        "findings": findings, "configurations": profiles,
+        "findings": findings,
+        "warnings": warnings,
+        "configurations": profiles,
+        "regional_configurations": catalog,
         "recovery": {
-            "status": recovery, "requested_configuration_first": True,
+            "profiles": recovery, "requested_configuration_first": True,
             "requires_confirmed_eligible_failure": True,
             "explanation": "PyFinder must submit the requested region first. Only its confirmed eligible failure may lead to a second global request. Global static checks do not prove native success.",
             "installed_caller_behavior": "unverified",
         },
         "limits": ["No native/provider/SMTP execution, container changes, data provisioning or queue changes occurred",
                    "Source settings and static service findings do not prove installed caller behavior or scientific coverage",
-                   "Only the selected configuration affects deployment status; global, Italy and Switzerland remain visible for inspection"],
+                   "Every configured routing profile and global contributes to this static assessment"],
     }
 
 
 def format_report(report):
     """Keep routine operator output readable; structured details remain opt-in."""
     findings = report.get("findings", [])
-    selected = next((item.get("configuration") for item in findings
-                     if item["check"] == "selected_configuration"), None)
     lines = [f"Deployment check: {report['status'].upper()} (read-only static checks)"]
+
+    # Warnings describe settings that had no effect. They do not participate
+    # in readiness aggregation or hide errors in the supported configuration.
+    if report.get("warnings"):
+        lines.append("\nWarnings (obsolete settings ignored):")
+        for warning in report["warnings"]:
+            lines.append("- " + warning)
 
     # Show the reason and next action together. Component validation can explain
     # a failure more precisely than the deployment-level summary.
     issues = [item for item in findings if item["status"] != "usable"
-              and item["check"] != "selected_configuration"]
+              and item["check"] != "routing_configuration"]
     lines.append("\nRequired issues and actions:" if issues else "\nNo required static issues reported.")
     for item in issues:
         label = f"{item['component']} {item['check'].replace('_', ' ')}"
@@ -268,12 +367,14 @@ def format_report(report):
         lines.append(f"  Action: {item['corrective_action']}")
 
     passed = [f"{item['component']} {item['check'].replace('_', ' ')}" for item in findings
-              if item["status"] == "usable" and item["check"] != "selected_configuration"]
+              if item["status"] == "usable" and item["check"] != "routing_configuration"]
     if passed:
         lines.append("\nStatic checks passed: " + "; ".join(passed) + ".")
 
     profiles = report.get("configurations", {})
-    lines.append(f"\nConfigurations (selected: {selected or 'not configured'}):")
+    catalog = report.get("regional_configurations", {})
+    lines.append("\nRegional routing: " + (", ".join(f"{country} -> {name}" for country, name in sorted(catalog.items())) or "unverified"))
+    lines.append("Configurations (per-profile static capability):")
     lines.append("  " + "; ".join(f"{name}: {profile['status'].upper()}"
                                   for name, profile in profiles.items()) if profiles
                  else "  No installed configuration diagnostics available.")
@@ -303,14 +404,11 @@ def format_report(report):
                 lines.append(f"  Action: {detail['corrective_action']}")
 
     recovery = report.get("recovery", {})
-    if selected == "global":
-        lines.append("\nFallback: global is selected; regional recovery is not needed.")
-    else:
-        lines.append("\nFallback: " + recovery.get("explanation", "Recovery has not been assessed."))
-        lines.append("  Installed caller recovery is unverified; global native success is not assured.")
+    lines.append("\nFallback: " + recovery.get("explanation", "Recovery has not been assessed."))
+    lines.append("  Installed caller recovery is unverified; global native success is not assured.")
     lines.append("\nLimits: no native/provider/SMTP execution or runtime changes. Static checks do not prove")
-    lines.append("installed source freshness, scientific coverage or native success. Only the selected profile")
-    lines.append("affects the overall result; other profiles are informational. Use --json for full details.")
+    lines.append("installed source freshness, scientific coverage or native success. Every configured routing")
+    lines.append("profile and global contributes to this assessment. Use --json for full details.")
     return "\n".join(lines)
 
 

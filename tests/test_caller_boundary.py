@@ -46,7 +46,6 @@ class CallerBoundaryTests(unittest.TestCase):
             "PYFINDER_SHAKEMAP_ENABLED": "false",
             "PYFINDER_SHAKEMAP_URL": "http://service.test:9010",
             "PYFINDER_SHAKEMAP_INPUT_DIRECTORY": probe.deployment.INPUT_TARGET,
-            "PYFINDER_SHAKEMAP_CONFIGURATION": "global",
             "PYFINDER_SHAKEMAP_REQUEST_TIMEOUT_SECONDS": "30",
             "PYFINDER_SHAKEMAP_OVERWRITE": "true",
         }
