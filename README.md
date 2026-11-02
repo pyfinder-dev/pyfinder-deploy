@@ -319,6 +319,35 @@ make stop COMPONENT=shakemap
 Stopping does not delete containers or mounted data. The helpers do not add
 restart supervision or a background host daemon.
 
+## Run a real playback
+
+With ShakeMap available and the canonical PyFinder caller already running, use
+PyFinder's existing public launcher from this deployment checkout:
+
+```sh
+PYFINDER_ALERT_CONFIG='' PYFINDER_SHAKEMAP_OVERWRITE=false \
+  ../pyfinder/scripts/pyfinder playback --event-ids 20230206_0000008
+```
+
+This selects one event for an immediate provider → FinDer → ShakeMap calculation
+using data available now. Replace the event ID as needed. PyFinder owns the event
+selection and scheduling flags; see `../pyfinder/scripts/pyfinder playback --help`
+for its current interface. Playback failures return nonzero; inspect the retained
+playback logs and evidence.
+
+The launcher uses the installed caller and shared runtime. It refuses an absent,
+stopped or incompatible caller and never starts one automatically. Start explicitly
+with `make start COMPONENT=pyfinder` and stop with `make stop COMPONENT=pyfinder`
+when a bounded test is complete. Continuous monitoring remains active during
+playback and can process natural alerts independently.
+
+The example disables email only for the playback process and archives preceding
+ShakeMap products and service records when a calculation ID is reused. Other
+settings inherit the running caller's configuration unless explicitly overridden.
+Saved deployment settings and the continuous process are unchanged. PyFinder keeps
+its existing workspace, log and evidence behavior; the ShakeMap overwrite setting
+is not a backup of caller workspaces.
+
 ## Limits and further configuration
 
 Global readiness does not certify a regional profile or scientific accuracy.
