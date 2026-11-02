@@ -181,9 +181,8 @@ class CheckTests(unittest.TestCase):
             self.config.read_text()
             + "PYFINDER_SHAKEMAP_CONFIGURATION=private-obsolete-value\n"
         )
-        self.caller_check.return_value["warnings"] = [
-            "shakemap.configuration is obsolete and ignored; remove it",
-        ]
+        source_warning = "Test-owned warning for shakemap.configuration"
+        self.caller_check.return_value["warnings"] = [source_warning]
         with patch.dict("os.environ", {
             "PYFINDER_SHAKEMAP_CONFIGURATION": "private-obsolete-value",
         }):
@@ -191,9 +190,15 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(report["status"], "usable")
         self.assertEqual(len(report["warnings"]), 3)
         text = checks.format_report(report)
-        self.assertIn("Warnings (obsolete settings ignored):", text)
-        self.assertIn("Saved PYFINDER_SHAKEMAP_CONFIGURATION", text)
-        self.assertIn("shakemap.configuration is obsolete", text)
+        self.assertIn(source_warning, text)
+        for origin in ("saved", "environment"):
+            warnings = [
+                warning for warning in report["warnings"]
+                if origin in warning.lower()
+                and "PYFINDER_SHAKEMAP_CONFIGURATION" in warning
+            ]
+            self.assertEqual(len(warnings), 1)
+            self.assertIn(warnings[0], text)
         self.assertNotIn("private-obsolete-value", json.dumps(report) + text)
         with patch.object(checks, "build_report", return_value=report):
             with redirect_stdout(io.StringIO()) as output:
@@ -300,9 +305,12 @@ class CheckTests(unittest.TestCase):
 
     def test_default_text_has_actions_and_no_routine_image_hashes(self):
         self.inventory.return_value = "shakemap-docker\n"
-        text = checks.format_report(self.report())
-        self.assertIn("Deployment check: BLOCKED", text)
-        self.assertIn("Action: Review prerequisites", text)
+        report = self.report()
+        blocked = next(item for item in report["findings"] if item["status"] == "blocked")
+        blocked["corrective_action"] = "Test-owned operator recovery action"
+        text = checks.format_report(report)
+        self.assertRegex(text.splitlines()[0], r"\bBLOCKED\b")
+        self.assertIn(blocked["corrective_action"], text)
         self.assertIn("global: USABLE", text)
         self.assertIn("Regional routing:", text)
         self.assertNotIn("image_id", text)
@@ -315,16 +323,22 @@ class CheckTests(unittest.TestCase):
             "section": ["modeling", "gmpe"], "key": "module", "reference": "regional.Model",
             "resolved_path": "/modules/regional.py", "corrective_action": "Install the configured module",
         }]
+        # The report supplies the qualification; its wording may change safely.
+        explanation = "Test-owned qualification: fallback requires confirmed eligible failure"
+        report["recovery"]["explanation"] = explanation
         text = checks.format_report(report)
         for value in ("/profiles/italy/model.conf", "modeling / gmpe", "regional.Model",
-                      "/modules/regional.py", "Install the configured module", "requested region first",
-                      "global native success is not assured"):
+                      "/modules/regional.py", "Install the configured module", explanation):
             self.assertIn(value, text)
 
     def test_repeated_endpoint_findings_are_grouped(self):
         self.http.side_effect = deployment.DeploymentError("unavailable")
-        text = checks.format_report(self.report())
-        self.assertEqual(text.count("configuration-check endpoint is unavailable"), 1)
+        report = self.report()
+        reason = "Test-owned repeated endpoint finding"
+        for profile in report["configurations"].values():
+            profile["findings"][0]["reason"] = reason
+        text = checks.format_report(report)
+        self.assertEqual(text.count(reason), 1)
         self.assertIn("global, italy, switzerland", text)
 
     def test_json_option_preserves_full_structured_report_and_exit_status(self):

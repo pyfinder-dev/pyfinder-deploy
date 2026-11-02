@@ -85,7 +85,18 @@ class CallerBoundaryTests(unittest.TestCase):
         cid.write_text(CONTAINER_ID)
         # Read context as literal AST data, never execute the container script.
         tree = ast.parse(options["input"])
-        context = json.loads(tree.body[1].value.args[0].value)
+        assignment, = (
+            node for node in tree.body
+            if isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id == "context"
+        )
+        self.assertIsInstance(assignment.value, ast.Call)
+        self.assertEqual(ast.unparse(assignment.value.func), "json.loads")
+        self.assertFalse(assignment.value.keywords)
+        argument, = assignment.value.args
+        context = json.loads(ast.literal_eval(argument))
         self.context = context
         self.assertEqual((self.inputs / context["host_marker"]).read_text(), context["nonce"])
         (self.inputs / context["caller_marker"]).write_text(context["nonce"])
