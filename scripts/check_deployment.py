@@ -246,7 +246,8 @@ def build_report(deployment, config_path):
         except (OSError, ValueError, subprocess.SubprocessError):
             catalog = {}
             add("pyfinder", "source_settings", "unverified", "The component settings checker is unavailable",
-                "Install the configured PyFinder host dependencies/check interface and rerun make check")
+                "Confirm PYFINDER_REPOSITORY points to the intended checkout and activate the project Python environment; "
+                "use compatible PyFinder/deployment versions, then rerun make check")
     else:
         add("pyfinder", "source_settings", "unverified", "Invalid deployment settings prevent component validation",
             "Correct the reported settings before checking application configuration")
