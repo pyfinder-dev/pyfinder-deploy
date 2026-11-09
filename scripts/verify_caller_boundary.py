@@ -221,6 +221,7 @@ def cleanup_marker(path, nonce):
 
 def verify(settings, evidence, *, fixture=None, event_id=None, expected_outcome="SUCCESS"):
     """Run one disposable canonical caller; retain evidence outside the runtime."""
+    deployment.progress("Caller verification: checking settings, shared inputs and canonical caller absence")
     runtime = deployment.service_runtime(settings)
     if (fixture is None) != (event_id is None):
         raise deployment.DeploymentError("Calculation fixture and event ID must be supplied together")
@@ -233,17 +234,26 @@ def verify(settings, evidence, *, fixture=None, event_id=None, expected_outcome=
     inputs = deployment.absolute_directory(str(runtime / "shakemap/data/inputs"), "Shared inputs")
     if settings["PYFINDER_SHAKEMAP_ENABLED"] != "false" or not settings["PYFINDER_SHAKEMAP_URL"]:
         raise deployment.DeploymentError("Probe requires disabled integration and an explicit caller URL")
-    if (not evidence.is_absolute() or evidence.parent.resolve(strict=True) != evidence.parent
+    try:
+        resolved_parent = evidence.parent.resolve(strict=True)
+    except OSError as error:
+        raise deployment.DeploymentError(
+            f"Cannot inspect evidence parent {evidence.parent} ({type(error).__name__}); "
+            "create an accessible, resolved parent directory before retrying; no probe evidence was created"
+        ) from error
+    if (not evidence.is_absolute() or resolved_parent != evidence.parent
             or evidence.exists() or evidence.is_symlink() or evidence.is_relative_to(runtime)):
         raise deployment.DeploymentError("Use a fresh absolute evidence directory outside runtime with an existing resolved parent")
     if present():
         raise deployment.DeploymentError("Canonical pyfinder-docker exists; preserve it and arrange explicit replacement first")
+    deployment.progress("Caller verification: inspecting the installed image identity")
     image_id, python_version = image_context()
     # Probe the installed image's capabilities. Local uncommitted edits do not
     # define an operator's installed release and must not gate verification.
     modules = list(MODULES)
 
     evidence.mkdir(mode=0o700)
+    deployment.progress(f"Caller verification: retaining protected evidence in {evidence}")
     nonce = uuid4().hex
     host_marker = inputs / (".pyfinder-boundary-" + nonce + "-host")
     caller_marker = inputs / (".pyfinder-boundary-" + nonce + "-caller")
@@ -289,12 +299,14 @@ def verify(settings, evidence, *, fixture=None, event_id=None, expected_outcome=
         launched = True
         process_deadline = 780 if fixture is not None else 120
         phase = f"running finite installed caller ({process_deadline} second process deadline)"
+        deployment.progress(f"Caller verification: {phase}")
         completed = command(arguments, timeout=process_deadline, input=program, env=deployment.environment(settings))
         (evidence / "stdout.log").write_text(completed.stdout)
         (evidence / "stderr.log").write_text(completed.stderr)
         if completed.returncode:
             raise deployment.DeploymentError(f"Finite caller probe exited {completed.returncode}; inspect protected evidence")
         phase = "validating returned evidence and host-visible caller marker"
+        deployment.progress(f"Caller verification: {phase}")
         rows = [line.split("=", 1)[1] for line in completed.stdout.splitlines()
                 if line.startswith("PYFINDER_CALLER_PROBE=")]
         if len(rows) != 1:
@@ -315,6 +327,7 @@ def verify(settings, evidence, *, fixture=None, event_id=None, expected_outcome=
     finally:
         # A failed/timeout probe must not leave a service-like container behind.
         # Cleanup errors remain visible without losing the original failure.
+        deployment.progress("Caller verification: cleaning only this probe's owned container and markers")
         operations = []
         if launched:
             operations.append(lambda: cleanup_container(cidfile))
@@ -366,16 +379,39 @@ def main():
     if Path(sys.prefix).resolve() != expected_environment.resolve():
         parser.error("Activate the existing .venv in the parent of this checkout; do not use system Python")
     try:
-        fixture = None if arguments.calculation_fixture is None else json.loads(arguments.calculation_fixture.read_text())
+        fixture = None
+        if arguments.calculation_fixture is not None:
+            try:
+                contents = arguments.calculation_fixture.read_text()
+            except (OSError, UnicodeError) as error:
+                raise deployment.DeploymentError(
+                    f"Cannot read calculation fixture {arguments.calculation_fixture} ({type(error).__name__}); "
+                    "check this file's path, read permissions and UTF-8 encoding; no probe evidence was created"
+                ) from error
+            try:
+                fixture = json.loads(contents)
+            except ValueError as error:
+                raise deployment.DeploymentError(
+                    f"Calculation fixture {arguments.calculation_fixture} is not valid JSON; "
+                    "correct the fixture before retrying; no probe evidence was created"
+                ) from error
         verify(deployment.load_settings(arguments.config), arguments.evidence,
                fixture=fixture, event_id=arguments.event_id, expected_outcome=arguments.expect_native)
     except (deployment.DeploymentError, OSError, ValueError, subprocess.SubprocessError) as error:
         detail = str(error) if isinstance(error, deployment.DeploymentError) else type(error).__name__
-        print(f"verify-caller: {detail}; inspect the protected evidence and configuration", file=sys.stderr)
+        print(
+            f"verify-caller: {detail}; "
+            "see docs/verification.md for prerequisites and evidence locations",
+            file=sys.stderr,
+        )
         return 1
     print(f"Finite installed caller checks passed; evidence: {arguments.evidence}")
     if arguments.calculation_fixture is None:
         print("No production workflow or scientific calculation ran; the canonical caller is absent.")
+        print(
+            "Next: review queue, email policy and optional regional-profile limitations; "
+            "explicitly enable integration and start the caller only when intended. See README.md."
+        )
     else:
         print("Explicit fixture outcome matched; inspect retained evidence. No production workflow ran and no deployment readiness is claimed.")
     return 0

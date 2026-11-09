@@ -1,436 +1,143 @@
 # PyFinder deployment
 
-This repository operates PyFinder and the separate ShakeMap service on one host.
-PyFinder receives earthquake alerts, schedules FinDer calculations and submits
-prepared inputs to ShakeMap. ShakeMap owns native calculations and their products.
-Deployment helpers configure and invoke the component helpers; the Makefile is a
-set of thin aliases.
+Install and operate PyFinder with a separate ShakeMap service on one Docker host.
+PyFinder receives alerts, schedules FinDer calculations and submits their inputs;
+ShakeMap produces the native maps. This repository configures and invokes the
+component helpers through thin Makefile targets.
 
-## Prerequisites and layout
+## 1. Prepare the host
 
-Provide Docker, Bash, Make, Git and a project Python environment using Python 3.12 or
-newer, with the component host dependencies installed. This is PyFinder's minimum;
-the standalone ShakeMap service package permits Python 3.10, which is insufficient
-for the combined project checks. The helpers do not install these prerequisites,
-clone repositories or create a virtual environment. Image builds and data
-provisioning require access to their upstream sources; do not bypass TLS or
-checksum failures.
-
-Use sibling checkouts with the following layout. Commands below run from
-`pyfinder-deploy` after activating the existing parent environment.
-
-```text
-workspace/
-├── .venv/
-├── pyfinder/
-├── shakemap-docker/
-└── pyfinder-deploy/
-    ├── deployment.env
-    └── runtime/
-        ├── pyfinder/
-        └── shakemap/
-```
-
-Install the host packages and check dependencies in that environment. PyFinder's
-offline checks import its actual manager and declared scientific dependencies;
-installing only the ShakeMap client is insufficient:
+Provide Docker, Bash, Make, Git and Python 3.12 or newer. For a new installation,
+choose your own workspace and use the supported sibling layout below. The finite
+caller verifier expects `.venv` in that workspace. If you already have these
+checkouts or an environment,
+[reuse them](docs/installation-and-operations.md#host-prerequisites) instead.
 
 ```sh
-# From pyfinder-deploy, use the existing project environment.
-set -e
-source ../.venv/bin/activate
-python -m pip install \
-  'paramws-clients @ git+https://github.com/pyfinder-dev/paramws-clients.git@master'
-python -m pip install -e ../pyfinder
-(cd ../shakemap-docker && python -m pip install -r requirements.txt)
+# Change this example to the host directory you want to use.
+PYFINDER_WORKSPACE="$HOME/pyfinder-workspace"
+mkdir -p "$PYFINDER_WORKSPACE"
+cd -P "$PYFINDER_WORKSPACE"
+git clone https://github.com/pyfinder-dev/pyfinder.git
+git clone https://github.com/pyfinder-dev/shakemap-docker.git
+git clone https://github.com/pyfinder-dev/pyfinder-deploy.git
+
+# Use your installed Python 3.12+ command; create this environment only once.
+python3.12 -m venv .venv
+source .venv/bin/activate
+command -v python
+python --version
+cd pyfinder-deploy
 ```
 
-The ParamWS command uses the same official `master` source as PyFinder's Dockerfile
-and does not modify any local ParamWS checkout. PyFinder is installed editable
-with its declared dependencies. ShakeMap's existing `requirements.txt` installs
-its editable host package, the `shake-in-docker` client and its host-check
-dependencies. These packages support offline checks and host helpers. Run FinDer
-workflows through `../pyfinder/scripts/pyfinder`, which invokes the required
-container; host package installation does not install the FinDer executable.
-
-The canonical images are `pyfinder:dev` and `shakemap-docker:latest`; their container
-names are `pyfinder-docker` and `shakemap-docker`. PyFinder retains the required
-FinDer base image, `ghcr.io/sceylan/finder-base:gmt5`. The legacy combined container
-repository is not part of this installation.
-
-## Configure the deployment
+Install the [host dependencies](docs/installation-and-operations.md#host-prerequisites)
+into that active environment, then prepare the local settings and runtime:
 
 ```sh
-# From the deployment checkout, activate the already provisioned environment.
-source ../.venv/bin/activate
-
-# Create missing caller directories and copy the settings template if absent.
 make setup
-
-# Print resolved paths to copy into the three required host-path settings.
-(cd ../pyfinder && pwd -P)
-(cd ../shakemap-docker && pwd -P)
-(cd runtime && pwd -P)
 ```
 
-Edit `deployment.env` before other operations. Setup preserves an existing file
-and runtime contents. The [example](deployment.env.example) deliberately leaves
-required host paths and the caller endpoint blank; it is a template, not a working
-deployment configuration. Fill `PYFINDER_REPOSITORY`, `SHAKEMAP_REPOSITORY` and
-`SHAKEMAP_RUNTIME_ROOT` with the resolved absolute paths printed above. The runtime
-must be this deployment checkout's `runtime` directory.
+All remaining commands run from `pyfinder-deploy` with this environment active.
+In each new terminal, return to your checkout and run
+`source ../.venv/bin/activate` first; do not create the environment again.
 
-Settings are literal `KEY=value` lines. Do not use quotes, `export`, inline comments,
-`~`, `$HOME`, `$PWD` or shell substitutions: the parser does not expand them. Paths
-may contain spaces. Unknown, duplicate and missing required settings are rejected.
-The recognized obsolete `PYFINDER_SHAKEMAP_CONFIGURATION` setting is an exception:
-it produces a warning and is ignored, without changing readiness or interrupting
-an otherwise valid operation. Its value is never applied or displayed.
+Setup creates missing caller directories and a private `deployment.env`; it
+preserves existing settings and data. Both containers share this checkout's
+`runtime/` directory. UID/GID `1000:1000` needs access to its writable paths.
 
-Set `PYFINDER_SHAKEMAP_URL` to an HTTP(S) endpoint reachable **from the caller
-container**. Docker Desktop commonly provides `host.docker.internal`; other Docker
-hosts need an explicitly configured route. These helpers do not add a host-gateway
-mapping or infer container connectivity from a successful host request. Keep
-`PYFINDER_SHAKEMAP_ENABLED=false` until verification is complete.
+## 2. Configure
 
-PyFinder selects each initial profile from its nonempty `regional-configurations`
-geometry catalog in the installed application image. Region labels are human
-identifiers; each entry declares a WKT coverage resource and service profile.
-Coverage may cross borders or split any area, and several regions can share a
-profile. FinDer's computational catalog remains independent. Selection uses the
-selected solution location, matching `event.xml`.
+Edit `deployment.env` and fill its four blank settings:
 
-Uncovered locations use global. Matching regions with a single shared profile
-select it once, including their common borders; different matching profiles warn
-and use global. A missing/unusable optional WKT logs the affected resource and
-uses global for that calculation without terminating services. The default seeds
-and [coverage authoring guide](../pyfinder/docs/shakemap-region-coverage.md)
-are separate from service-owned native scientific assets. Caller WKT changes
-require rebuilding/redeploying the caller. Native files may be supplied later;
-these helpers never silently repair operator profiles or turn file absence into
-an installation prerequisite.
+| Setting | Value to provide |
+| --- | --- |
+| `PYFINDER_REPOSITORY` | Resolved absolute path to the PyFinder checkout |
+| `SHAKEMAP_REPOSITORY` | Resolved absolute path to the ShakeMap checkout |
+| `SHAKEMAP_RUNTIME_ROOT` | Resolved absolute path to this checkout's `runtime` directory |
+| `PYFINDER_SHAKEMAP_URL` | HTTP(S) service address reachable **from the caller container** |
 
-Service discovery does not skip a mapped native profile. The service executes
-the explicit selection and never infers a region or substitutes another profile.
-PyFinder can retain a confirmed regional configuration failure and submit once
-more explicitly with `global`, using the same public calculation ID and a new
-native sequence. Uncertain acceptance, read failures and unrelated native failures
-do not authorize that recovery. Both attempts remain visible in retained evidence
-and diagnostics. See the [adapter guide](../pyfinder/docs/shakemap-adapter.md).
+Use literal `KEY=value` lines, without quotes or shell expansion. Keep
+`PYFINDER_SHAKEMAP_ENABLED=false` for the checks below. Keep `PYFINDER_ALERT_CONFIG=`
+empty to disable email, or configure it separately before activation. See
+[settings and connectivity](docs/installation-and-operations.md#settings-and-connectivity)
+for paths, routing and email details.
 
-`PYFINDER_SHAKEMAP_OVERWRITE=true` replaces the preceding calculation's complete
-service and product trees when its public ID is reused; `false` archives both
-before recalculation. Neither option updates an old result file by file.
-
-Optional `PYFINDER_ALERT_CONFIG` selects the existing separate email configuration
-by its container path under `/home/sysop/runtime/pyfinder`. The mapped file must
-exist without symlinks. Empty disables email; omitting the key preserves PyFinder's
-legacy configuration discovery. The example disables email. Keep credentials and
-recipient lists in the separate file, never in `deployment.env`. See
-[PyFinder notification configuration](../pyfinder/README.md).
-
-## Build, prepare data and start
+## 3. Build and initialize ShakeMap
 
 ```sh
-# Build the two canonical images from the configured component checkouts.
 make build COMPONENT=pyfinder
 make build COMPONENT=shakemap
 
-# Inspect existing global assets before explicitly provisioning missing data.
 make data COMPONENT=shakemap DATA_ACTION=inspect
+# Run provision only when inspection identifies missing global assets.
 make data COMPONENT=shakemap DATA_ACTION=provision
 make data COMPONENT=shakemap DATA_ACTION=validate
 
-# Prepare and verify the service; this can recreate its canonical container
-# and run native verification calculations.
+# Prepares runtime and runs native global verification; may recreate the service.
 make finalize COMPONENT=shakemap
-
-# Start an already finalized, compatible service when it is stopped.
-make start COMPONENT=shakemap
-
-# Inspect service state before the separate verification steps below.
-make status
 ```
 
-The deployment data helper manages the pinned global VS30 and topography assets.
-`inspect` reads presence/readability, `validate` verifies identities without writing,
-`provision` installs missing assets, and `stage` validates replacements without
-activating them. For manual imports, additional assets and regional prerequisites,
-use the [service data and configuration guide](../shakemap-docker/docs/configuration.md).
-Direct component commands must receive this deployment runtime explicitly:
-`--runtime` for the data helper and `--runtime-root` for service lifecycle helpers.
-Their defaults otherwise refer to the component checkout's own runtime.
+Successful finalization leaves ShakeMap ready and running. Follow a failed
+step's diagnostic before proceeding; inspect [logs and recovery guidance](docs/installation-and-operations.md#logs-and-troubleshooting).
+Optional regional files may be supplied later and do not block global installation
+or service startup. Regional failures remain visible; see
+[regional configuration](docs/installation-and-operations.md#regional-configuration).
 
-Finalization is a mutating operation. It may create or replace the canonical
-service container and publish readiness only after its verification succeeds.
-Failure can revoke readiness and stop the service. Ordinary setup and startup do
-not migrate runtime data or silently replace incompatible containers. Resolve
-reported image, environment or mount conflicts deliberately while preserving
-mounted data.
+## 4. Verify before activating PyFinder
 
-## Shared storage and ownership
-
-Both containers bind the same host `runtime` parent to `/home/sysop/runtime`.
-The caller prepares inputs at `/home/sysop/runtime/shakemap/data/inputs`; there is
-no additional input bind. UID/GID `1000:1000` must have actual access to the required
-writable paths. Setup does not recursively change ownership or permissions.
-
-PyFinder owns `runtime/pyfinder`, including its state, logs, runs and playback
-workspaces. ShakeMap owns `runtime/shakemap`, including data, native products and
-internal service records. The shared parent exposes both trees to both containers;
-application ownership is not filesystem isolation. ShakeMap's global, regional and
-test dataset overlays are read-only in the service container. They do not make the
-caller's view read-only or authorize it to modify service datasets.
-
-## Check the current installation
-
-Run `make check` before choosing the next installation or activation action. It
-accumulates independent findings even when settings, images or containers are
-missing. It reads literal settings, Docker inventory and inspection, GET service
-health/configuration checks, and an existing closed operational queue. It does
-not build, download, provision, start containers, submit calculations, send email,
-change readiness or write queue state. No report is saved automatically.
+Keep integration disabled and the canonical `pyfinder-docker` container **absent**
+for the installed-image check and finite caller probe. An existing stopped caller
+also occupies that name; use the [upgrade procedure](#upgrade-the-caller) to preserve
+its contents before deliberate replacement.
 
 ```sh
+make test
+make verify-image
+# Replace with a new absolute directory outside runtime; its parent must exist.
+make verify-caller EVIDENCE=/absolute/fresh/evidence-directory
 make check
-# The helper also accepts an alternate literal settings file.
-./scripts/check-deployment.sh --config /absolute/path/to/deployment.env
-# Opt in to the full structured report for automation or detailed inspection.
-./scripts/check-deployment.sh --json
 ```
 
-The default report groups required issues and actions, compact successful checks,
-profile findings, conditional fallback and evidence limits. It identifies
-configuration files, setting keys and the service's
-resolved asset paths where available. Fix the reported setting or resource using
-the named component helper; the check never repairs scientific profiles. Global and every profile referenced by PyFinder's routing catalog are assessed
-independently. Each contributes to the deployment report; a blocked regional
-profile with statically usable global recovery remains conditional/unverified,
-not silently usable. Native regional scientific qualification remains a separate check.
+`make check` explains missing prerequisites and configuration findings without
+changing the deployment. An absent caller and disabled integration are expected
+at this stage and still appear as blocked: do not start continuous work merely
+to obtain a green report. Review the queue, settings, regional findings and email
+policy before activation. [Verification details](docs/verification.md) distinguish
+host tests, installed-image checks, running-service checks and native calculations.
+Global verification does not qualify every region or the full production chain.
 
-`usable` means the inspected static capability has no known blocker. `degraded`
-means a known limited capability remains usable. `blocked` identifies a confirmed
-obstacle, including an absent continuous caller or overdue queue requiring an
-operator decision. `unverified` means required evidence is unavailable, including
-an older service without the diagnostic endpoint. The direct `check-deployment.sh` helper returns **0** for usable or degraded,
-**1** for blocked, and **2** for unverified (also conventional usage errors).
-GNU Make returns **2** when its recipe fails, so inspect the report status or invoke
-the helper directly when distinguishing blocked from unverified in automation.
-When findings differ, blocked takes precedence over unverified. Neither
-exit 0 nor a listed profile proves native execution or scientific coverage.
+## 5. Activate and operate
 
-The caller settings check runs the configured source checkout with the deployment
-settings and known host input mount. It is not proof of installed-image behavior.
-Regional recovery remains conditional: PyFinder submits the selected region first
-and may submit global only after its confirmed eligible failure. A static regional
-error does not skip that first request. Global is assessed separately, and unknown
-installed caller behavior remains unverified.
-
-Email may remain explicitly disabled; real SMTP delivery is not a universal
-activation prerequisite. Configured or implicitly discovered email is reported as
-unverified because this command does not send mail. For the queue, absent state
-means startup initializes an empty queue. An existing closed, sidecar-free SQLite
-snapshot reports status counts and overdue pending work. Active or uncertain state
-is unverified. Preserve existing work and decide whether it belongs to this
-installation before activation; no helper silently clears or resets a backlog.
-
-## Verify before continuous operation
-
-Keep host tests, installed-image checks and running-service checks separate.
-Container state, a healthy service and a listed configuration each answer different
-questions. Configuration listing alone does not validate its scientific modules,
-datasets, coverage or native execution.
-
-Keep caller integration disabled and the canonical caller name absent while
-running the installed-image check, then the finite caller probe. Complete any
-required native fixture checks before proceeding to continuous activation below.
-`make verify` inspects existing containers and therefore belongs after both have
-been created; it does not replace these pre-activation checks.
-
-| Command | What it checks and changes |
-| --- | --- |
-| `make test` | Host tests using temporary files, fake commands and a local HTTP stub; no deployment readiness claim |
-| `make verify` | Read-only host paths, service health/configuration, image identity, mounts and settings; both canonical containers must already exist |
-| `make verify-image` | Installed-image checks with network disabled and temporary runtime; requires the canonical caller name to be absent |
-| `make verify-caller EVIDENCE=/absolute/fresh/evidence-directory` | Finite installed imports, shared-input access and read-only REST checks; creates a transient canonical caller and owned input marker, then removes both |
-| `make verify-native` | Native fixture verification; changes service state and can revoke readiness/stop the service on failure |
-
-`make verify` requires both canonical containers to be running and checks their
-wiring. `make check` diagnoses incomplete installations and reports broader
-unknowns such as an active queue or unverified email configuration. Their exit
-policies differ; neither command performs native verification.
-The component repositories own installed-image and native verification logic;
-deployment supplies settings and delegates instead of maintaining another verifier.
-
-Use a new absolute evidence directory outside runtime for each caller probe. The
-helper refuses an existing `pyfinder-docker`, pins the image identity, uses the
-canonical parent mount and UID/GID, and does not mount application source to hide
-packaging defects. It reports the installed package versions, module origins and
-image identity while checking the required interfaces. Detailed build-record
-consistency belongs to `make verify-image`; the caller probe retains installed
-import containment, runtime identity, shared-input and service-connectivity checks.
-It does not compare files with an uncommitted checkout or establish that an image
-contains the latest source changes. Rebuild intentionally when deploying changes. Preserve any
-existing caller's necessary container-only files before a deliberate removal;
-verification does not perform that removal for you.
-The ordinary caller probe does not run the production listener, FinDer, provider
-queries or email delivery.
-
-For an explicit synthetic native calculation, use the optional fixture mode:
+After the required checks and queue review, set `PYFINDER_SHAKEMAP_ENABLED=true`
+in `deployment.env`, then start PyFinder explicitly:
 
 ```sh
-# Replace both placeholder values with fresh, explicitly owned values.
-./scripts/verify-caller-deployment.sh \
-  --evidence /absolute/fresh/evidence-directory \
-  --calculation-fixture tests/fixtures/shakemap-global.json \
-  --event-id pyfinder-verification-global-UNUSED_t00000
-```
-
-The fixture supplies a physical UTC origin, coordinates, magnitude, depth and
-station PGA in cm/s². Installed manager/exporter code prepares the inputs without
-running FinDer. The helper requires an idle service and an unused ID across inputs,
-products, current records and archives. It reserves a new playback workspace under
-`runtime/pyfinder/playbacks/<event_id>/shakemap-verification` and keeps its SQLite
-intent, observations, logs and evidence separate from the operational database.
-
-The helper makes one POST and follows the exact acknowledged sequence with bounded
-polling. It never retries uncertain acceptance. A timeout does not cancel a native
-job. Results and failed-run evidence are retained; only the transient caller and
-owned probe markers are removed. Native calculations can make their own external
-requests, including STREC lookups.
-
-Successful verification requires the product manifest, core products, hashes,
-provenance, logs and selected-profile evidence. An explicit `--expect-native FAILED`
-asserts a known negative test; it never establishes regional readiness. This helper
-submits one selected configuration and does not exercise scheduler-owned fallback.
-
-## Reset scheduled work explicitly
-
-`make reset` clears all rows in the continuous caller's scheduler table, including
-pending, processing and terminal schedule records. The canonical `pyfinder-docker`
-container must be stopped or absent; unknown Docker state also blocks the reset.
-Keep other processes that write the caller database stopped during this operation.
-
-The command acts only on `runtime/pyfinder/state/scheduled_queries.sqlite3` in
-this deployment checkout; it accepts neither a component selector nor an alternate
-configuration file to change that scope. It retains all other database tables, including
-alert deliveries/evidence and ShakeMap submission records. It preserves playback
-state, configurations, datasets, logs, calculation products and evidence files.
-Already accepted ShakeMap jobs may still finish and be observed; pending mail
-may still be delivered after startup. Reset cancels neither. SQLite handles
-valid journals transactionally; redirected files and an active database writer
-cause refusal. No state is created when the scheduler database is absent.
-
-```sh
-make stop COMPONENT=pyfinder
-make reset
-```
-
-This is an explicit deletion of scheduler history and pending work. Ordinary
-startup continues to retain and process scheduled work; reset is never automatic.
-
-## Activate and stop continuous operation
-
-After the required verification and configuration review, set
-`PYFINDER_SHAKEMAP_ENABLED=true` and start the caller:
-
-```sh
-# This starts continuous alert reception, provider queries and FinDer processing.
+# Starts continuous alert reception, provider queries and FinDer processing.
 make start COMPONENT=pyfinder
-
-# Once both canonical containers exist, inspect their configured wiring.
 make verify
+```
 
-# When pausing both components, stop the caller before the service.
+`make verify` requires both canonical containers running and checks their wiring
+read-only. Use `make check` for broader diagnostics and `make status` for container
+state. To resume a stopped, already-finalized compatible service, run
+`make start COMPONENT=shakemap` before starting the caller.
+
+```sh
+# Pause the caller before stopping the service. Mounted data is retained.
 make stop COMPONENT=pyfinder
 make stop COMPONENT=shakemap
 ```
 
-Stopping does not delete containers or mounted data. The helpers do not add
-restart supervision or a background host daemon.
+Use [operations and logs](docs/installation-and-operations.md#logs-and-troubleshooting)
+for failures, playback and deliberate scheduler reset. Run `make help` for targets;
+helpers accept `--help`. No restart supervisor is installed by these commands.
 
 ## Upgrade the caller
 
-Update PyFinder and this deployment checkout together. Removing the obsolete
-`PYFINDER_SHAKEMAP_CONFIGURATION` line from `deployment.env` and unsetting that
-shell variable is recommended. Helpers warn and ignore either source while
-continuing with valid supported settings; removal is not an activation prerequisite.
-Ordinary helpers print warnings to stderr. `make check` includes deployment and
-caller warnings separately in its human and JSON reports; warnings alone do not
-block or degrade the required checks.
-The new source catalog replaces the old fixed setting. Keep the remaining
-endpoint, input, timeout, enablement, overwrite and email settings.
+Follow the [caller upgrade procedure](docs/installation-and-operations.md#upgrade-the-caller)
+to preserve container-only files, rebuild intentionally, verify installed dependency
+identity and repeat preactivation checks. Ordinary cached builds may retain an
+older fetched dependency. Do not delete runtime data or reset the queue to upgrade.
 
-Before replacing the canonical caller, stop it and inspect `docker diff
-pyfinder-docker`. Preserve any needed container-only files separately; mounted
-runtime data remains in place. Ordinary stop retains the old container, so a
-new image or changed environment requires deliberate removal and recreation:
-
-```sh
-make stop COMPONENT=pyfinder
-# After preserving any required container-only files:
-docker rm pyfinder-docker
-make build COMPONENT=pyfinder
-# Run the preactivation checks described above while the name is absent.
-make verify-image
-# After the finite caller probe and configuration/queue review:
-make start COMPONENT=pyfinder
-make verify
-```
-
-Use the existing `make verify-caller EVIDENCE=...` between image verification and
-continuous startup, with a fresh absolute evidence directory. Do not delete the
-runtime or reset its database for this upgrade. Existing prepared calculations
-keep their original service profile, inputs and overwrite policy after restart.
-Changing the source catalog requires rebuilding and recreating the caller;
-restarting its old container does not install new application settings.
-
-## Run a real playback
-
-With ShakeMap available and the canonical PyFinder caller already running, use
-PyFinder's existing public launcher from this deployment checkout:
-
-```sh
-PYFINDER_ALERT_CONFIG='' PYFINDER_SHAKEMAP_OVERWRITE=false \
-  ../pyfinder/scripts/pyfinder playback --event-ids 20230206_0000008
-```
-
-This selects one event for an immediate provider → FinDer → ShakeMap calculation
-using data available now. Replace the event ID as needed. PyFinder owns the event
-selection and scheduling flags; see `../pyfinder/scripts/pyfinder playback --help`
-for its current interface. Playback failures return nonzero; inspect the retained
-playback logs and evidence.
-
-The launcher uses the installed caller and shared runtime. It refuses an absent,
-stopped or incompatible caller and never starts one automatically. Start explicitly
-with `make start COMPONENT=pyfinder` and stop with `make stop COMPONENT=pyfinder`
-when a bounded test is complete. Continuous monitoring remains active during
-playback and can process natural alerts independently.
-
-The example disables email only for the playback process and archives preceding
-ShakeMap products and service records when a calculation ID is reused. Other
-settings inherit the running caller's configuration unless explicitly overridden.
-Saved deployment settings and the continuous process are unchanged. PyFinder keeps
-its existing workspace, log and evidence behavior; the ShakeMap overwrite setting
-is not a backup of caller workspaces.
-
-## Limits and further configuration
-
-Global readiness does not certify a regional profile or scientific accuracy.
-Italy and Switzerland require their own compatible scientific modules, regional
-data and configuration checks described in the service guide. Runtime-only profile
-changes are not automatically reproduced by setup or a fresh checkout. A successful
-fixture applies to that fixture, profile, data and image; it does not validate every
-geographic branch or the full scheduled production chain.
-
-Finite caller checks do not establish actual provider acquisition, FinDer results,
-scheduler recovery, notification delivery or operational supervision. Validate
-those boundaries separately before relying on continuous operation. Build inputs
-can also change upstream; retain the actual image and recorded dependency identity
-when reproducibility matters.
-
-Run `make help` for aliases. Operational wrappers and the caller verifier accept
-`--help` and, where applicable, `--config /absolute/path/to/deployment.env` for alternate literal
-settings. The component documentation remains authoritative for
-[PyFinder workflows](../pyfinder/README.md) and
-[ShakeMap service operations](../shakemap-docker/README.md).
+Component references: [PyFinder workflows](../pyfinder/README.md),
+[ShakeMap operations](../shakemap-docker/README.md).

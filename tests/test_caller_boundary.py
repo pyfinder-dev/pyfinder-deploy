@@ -3,6 +3,8 @@
 import ast
 from copy import deepcopy
 import importlib
+import io
+from contextlib import redirect_stderr, redirect_stdout
 import json
 from pathlib import Path
 import subprocess
@@ -241,6 +243,39 @@ class CallerBoundaryTests(unittest.TestCase):
             with self.subTest(target=target), self.assertRaises(probe.deployment.DeploymentError):
                 self.verify()
         self.assertEqual(self.calls, [])
+
+    def test_missing_evidence_parent_names_required_directory_before_probe(self):
+        self.evidence = self.root / "missing-parent/evidence"
+        with self.assertRaises(probe.deployment.DeploymentError) as error:
+            self.verify()
+        self.assertIn(str(self.evidence.parent), str(error.exception))
+        self.assertIn("no probe evidence was created", str(error.exception))
+        self.assertEqual(self.calls, [])
+        self.assertFalse(self.evidence.parent.exists())
+
+    def test_unreadable_or_malformed_fixture_fails_before_evidence_or_container(self):
+        fixture = self.root / "fixture.json"
+        for contents in (None, b"not-json-private-content", b"\xff"):
+            if contents is not None:
+                fixture.write_bytes(contents)
+            with (
+                self.subTest(contents=contents),
+                patch.object(sys, "argv", ["verify-caller", "--evidence", str(self.evidence),
+                                          "--calculation-fixture", str(fixture),
+                                          "--event-id", "pyfinder-verification-example_t00000"]),
+                patch.object(probe, "verify") as verify,
+                redirect_stderr(io.StringIO()) as error,
+                redirect_stdout(io.StringIO()) as output,
+            ):
+                code = probe.main()
+            self.assertEqual(code, 1)
+            self.assertIn(str(fixture), error.getvalue())
+            self.assertIn("no probe evidence was created", error.getvalue())
+            self.assertNotIn("not-json-private-content", error.getvalue())
+            self.assertNotIn("Traceback", error.getvalue())
+            self.assertEqual(output.getvalue(), "")
+            verify.assert_not_called()
+            self.assertFalse(self.evidence.exists())
 
     def prepare_native(self):
         from test_calculation_fixture import FIXTURE, EVENT_ID

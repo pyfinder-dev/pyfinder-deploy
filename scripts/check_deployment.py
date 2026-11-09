@@ -165,7 +165,13 @@ def build_report(deployment, config_path):
                 if component == "pyfinder":
                     caller_running = False
                 add(component, "container", "blocked", "Canonical container is absent",
-                    f"Review prerequisites and queue intent before make start COMPONENT={component}", container=container_name)
+                    ("During installation, keep the caller absent and integration disabled "
+                     "for make verify-image and make verify-caller; then review the queue and settings "
+                     "before enabling integration and make start COMPONENT=pyfinder"
+                     if component == "pyfinder" else
+                     "Complete data validation and make finalize COMPONENT=shakemap for a new installation; "
+                     "use make start COMPONENT=shakemap only for an already-finalized compatible runtime"),
+                    container=container_name)
                 continue
             try:
                 container = deployment.inspect("container", container_name)
@@ -174,7 +180,13 @@ def build_report(deployment, config_path):
                     caller_running = running
                 add(component, "container", "usable" if running else "blocked",
                     "Canonical container is running" if running else "Canonical container is stopped",
-                    f"Use make start COMPONENT={component} only after reviewing prerequisites", container=container_name)
+                    ("For installation or upgrade, finish the absent-caller image/probe checks "
+                     "and review queue/settings before explicit activation; "
+                     "see README and docs/installation-and-operations.md before replacing an existing caller"
+                     if component == "pyfinder" else
+                     "Use make start COMPONENT=shakemap for an already-finalized compatible runtime; "
+                     "otherwise follow data validation and finalization in README"),
+                    container=container_name)
                 if image is not None and not invalid:
                     wiring = deployment.container_problems(settings, component, image, container)
                     add(component, "wiring", "blocked" if wiring else "usable",
@@ -225,7 +237,9 @@ def build_report(deployment, config_path):
                     if caller["status"] == "ready" else
                     "PyFinder settings are incomplete or disabled"
                 ),
-                "Review the component findings and saved settings",
+                "Review component findings and saved settings; "
+                "integration stays disabled for preactivation image/probe checks, "
+                "then is explicitly enabled before continuous startup",
                 scope="source_configuration",
                 component_report=caller,
             )
@@ -278,7 +292,11 @@ def build_report(deployment, config_path):
                 profiles[name] = {"configuration": name, "status": "unverified", "scope": "static",
                                   "native_execution": "not_run", "findings": [{
                                       "status": "UNKNOWN", "reason": "Installed service configuration-check endpoint is unavailable or unsupported",
-                                      "corrective_action": "Deploy a service with the check endpoint, then rerun make check; no native execution was performed"}]}
+                                      "corrective_action": (
+                                          "Ensure the canonical service is running and reachable; "
+                                          "update it only if the running service lacks this endpoint, "
+                                          "then rerun make check; no native execution was performed"
+                                      )}]}
     else:
         add("shakemap", "configuration_checks", "unverified", "A valid service port is required for installed checks",
             "Correct SHAKEMAP_PORT; no host-profile substitution was used")

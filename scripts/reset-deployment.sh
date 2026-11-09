@@ -9,7 +9,8 @@ if [[ -n "${COMPONENT:-}" ]]; then
 fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -z "${VIRTUAL_ENV:-}" || "$(command -v python)" != "${VIRTUAL_ENV}/bin/python" ]]; then
-    echo "Activate the existing project .venv before resetting scheduler state." >&2
+    printf 'Activate the existing project environment: source %q\n' "${SCRIPT_DIR}/../../.venv/bin/activate" >&2
+    echo "For missing host packages, see docs/installation-and-operations.md in pyfinder-deploy." >&2
     exit 2
 fi
 exec "${VIRTUAL_ENV}/bin/python" -B "${SCRIPT_DIR}/deployment.py" reset "$@"

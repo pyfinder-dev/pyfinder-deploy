@@ -2,10 +2,13 @@
 
 import argparse
 import importlib.util
+import io
+from contextlib import redirect_stderr, redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import os
 import sqlite3
 import subprocess
+import sys
 from pathlib import Path
 import tempfile
 import threading
@@ -330,12 +333,84 @@ class DeploymentTests(unittest.TestCase):
         example.write_text("example contents")
         alternate = self.root / "alternate.env"
         runtime = self.root / "runtime"
-        with patch.object(deployment, "ROOT", self.root), patch.object(deployment, "PYFINDER_RUNTIME", runtime):
+        with (
+            patch.object(deployment, "ROOT", self.root),
+            patch.object(deployment, "PYFINDER_RUNTIME", runtime),
+            redirect_stdout(io.StringIO()) as output,
+        ):
             deployment.setup(alternate)
         self.assertEqual(alternate.read_text(), "example contents")
         self.assertEqual(alternate.stat().st_mode & 0o777, 0o600)
         self.assertEqual(self.config.read_text().splitlines()[0],
                          "PYFINDER_REPOSITORY=" + str(self.pyfinder))
+        self.assertIn(str(alternate), output.getvalue())
+
+    def test_setup_filesystem_failures_are_actionable_without_tracebacks_or_repair(self):
+        original = self.config.read_bytes()
+        for method in ("is_symlink", "mkdir"):
+            with (
+                self.subTest(method=method),
+                patch.object(Path, method, side_effect=PermissionError("private-error-detail")),
+                patch.object(sys, "argv", ["deployment.py", "setup", "--config", str(self.config)]),
+                redirect_stderr(io.StringIO()) as error,
+                redirect_stdout(io.StringIO()),
+            ):
+                code = deployment.main()
+            self.assertEqual(code, 1)
+            self.assertIn(str(self.runtime), error.getvalue())
+            self.assertIn("PermissionError", error.getvalue())
+            self.assertNotIn("Traceback", error.getvalue())
+            self.assertNotIn("private-error-detail", error.getvalue())
+            self.assertEqual(self.config.read_bytes(), original)
+        self.assertEqual(list(self.runtime.iterdir()), [])
+
+    def test_command_failures_name_executable_and_directory_without_private_arguments(self):
+        missing = self.root / "missing-helper"
+        cases = ((missing, self.root), (Path("/bin/sh"), self.root / "missing-directory"))
+        for executable, directory in cases:
+            with self.subTest(executable=executable), self.assertRaises(deployment.DeploymentError) as error:
+                deployment.run([str(executable), "private-argument"], cwd=directory)
+            self.assertIn(str(executable), str(error.exception))
+            self.assertIn(str(directory), str(error.exception))
+            self.assertNotIn("private-argument", str(error.exception))
+
+        with self.assertRaises(deployment.DeploymentError) as error:
+            deployment.run(["/bin/sh", "-c", "printf private-stderr >&2; exit 17"],
+                           cwd=self.root, capture=True)
+        self.assertIn("17", str(error.exception))
+        self.assertNotIn("private-stderr", str(error.exception))
+
+    def test_action_progress_uses_stderr_and_never_announces_success_after_failure(self):
+        for failure in (False, True):
+            def operation(_args):
+                print("command-data")
+                if failure:
+                    raise deployment.DeploymentError("safe failure")
+                return 0
+
+            with (
+                self.subTest(failure=failure),
+                patch.object(sys, "argv", ["deployment.py", "build", "--component", "shakemap"]),
+                patch.object(deployment, "dispatch", side_effect=operation),
+                redirect_stdout(io.StringIO()) as output,
+                redirect_stderr(io.StringIO()) as error,
+            ):
+                code = deployment.main()
+            self.assertEqual(output.getvalue(), "command-data\n")
+            self.assertEqual(code, 1 if failure else 0)
+            self.assertIn("Starting build (shakemap)", error.getvalue())
+            self.assertEqual("Completed build" in error.getvalue(), not failure)
+
+    def test_unactivated_wrapper_explains_activation_before_any_workflow(self):
+        environment = {**os.environ, "VIRTUAL_ENV": ""}
+        result = subprocess.run(
+            ["bash", str(deployment.ROOT / "scripts/setup-deployment.sh")],
+            env=environment, capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("source ", result.stderr)
+        self.assertIn(".venv/bin/activate", result.stderr)
+        self.assertEqual(result.stdout, "")
 
     def test_portable_template_requires_paths_and_preserves_completed_setup(self):
         # Exercise the shipped template in a new temporary deployment, not the
@@ -490,7 +565,7 @@ class DeploymentTests(unittest.TestCase):
                 deployment.dispatch(self.arguments("start", "pyfinder"))
             run.assert_not_called()
 
-    def test_external_runtime_is_rejected_before_any_component_command(self):
+    def test_invalid_host_paths_are_rejected_before_any_component_command(self):
         external = self.root / "old-development-runtime"
         external.mkdir()
         self.settings["SHAKEMAP_RUNTIME_ROOT"] = str(external)
@@ -500,6 +575,19 @@ class DeploymentTests(unittest.TestCase):
                 deployment.dispatch(self.arguments("start", "shakemap"))
             run.assert_not_called()
         self.assertEqual(list(external.iterdir()), [])
+
+        self.settings["SHAKEMAP_RUNTIME_ROOT"] = str(self.runtime)
+        self.write_config()
+        with (
+            patch.object(Path, "resolve", side_effect=PermissionError("private-filesystem-detail")),
+            patch.object(deployment, "run") as run,
+            self.assertRaises(deployment.DeploymentError) as error,
+        ):
+            deployment.dispatch(self.arguments("start", "shakemap"))
+        self.assertIn(str(self.pyfinder), str(error.exception))
+        self.assertIn("PermissionError", str(error.exception))
+        self.assertNotIn("private-filesystem-detail", str(error.exception))
+        run.assert_not_called()
 
     def test_environment_has_only_reviewed_adapter_settings(self):
         self.configure_service()

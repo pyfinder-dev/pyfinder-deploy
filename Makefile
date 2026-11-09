@@ -7,6 +7,8 @@ DATA_ACTION ?=
 export COMPONENT DATA_ACTION EVIDENCE
 
 help:
+	@echo 'Installation: setup -> edit deployment.env -> build both images -> inspect/provision/validate data -> finalize COMPONENT=shakemap.'
+	@echo 'Before caller activation: test, verify-image, verify-caller EVIDENCE=/fresh/absolute/path; review queue/settings, then explicitly enable/start caller and verify. See README.md.'
 	@echo 'Read-only: check (accumulated diagnostics), status (container state), verify (strict running wiring).'
 	@echo 'Explicit checks: verify-image (offline temporary caller), verify-native (ShakeMap calculations/readiness changes), verify-caller EVIDENCE=... (temporary caller/network probe).'
 	@echo 'Changes: setup, build COMPONENT=..., data COMPONENT=shakemap DATA_ACTION=..., finalize COMPONENT=shakemap, start/stop COMPONENT=..., reset (scheduler rows only)'

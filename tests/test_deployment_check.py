@@ -2,7 +2,7 @@
 
 import importlib.util
 import io
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 import json
 from pathlib import Path
 import sqlite3
@@ -135,6 +135,31 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(len([item for item in report["findings"] if item["check"] == "container"]), 2)
         self.assertEqual(set(report["configurations"]), {"global"})
         self.caller_check.assert_not_called()
+
+        self.write_settings()
+        with patch.object(Path, "resolve", side_effect=PermissionError("private-filesystem-detail")):
+            report = self.report()
+        self.assertEqual(report["status"], "blocked")
+        path_errors = [item for item in report["findings"] if item["check"] == "setting"]
+        self.assertEqual({item["key"] for item in path_errors},
+                         {"PYFINDER_REPOSITORY", "SHAKEMAP_REPOSITORY", "SHAKEMAP_RUNTIME_ROOT"})
+        self.assertTrue(all("PermissionError" in item["reason"] for item in path_errors))
+        self.assertNotIn("private-filesystem-detail", json.dumps(report))
+
+    def test_invalid_settings_encoding_preserves_accumulated_json_without_contents(self):
+        self.config.write_bytes(b"private-setting-content=\xff\n")
+        with redirect_stdout(io.StringIO()) as output, redirect_stderr(io.StringIO()) as error:
+            code = checks.check(deployment, self.config, json_output=True)
+        report = json.loads(output.getvalue())
+        self.assertEqual(code, 1)
+        self.assertEqual(report["status"], "blocked")
+        finding = next(item for item in report["findings"] if item["check"] == "settings")
+        self.assertIn(str(self.config), finding["reason"])
+        self.assertIn("UTF-8", finding["reason"])
+        self.assertTrue(any(item["check"] == "queue" for item in report["findings"]))
+        self.assertTrue(any(item["check"] == "image" for item in report["findings"]))
+        self.assertNotIn("private-setting-content", output.getvalue() + error.getvalue())
+        self.assertEqual(error.getvalue(), "")
 
     def test_blocked_caller_validation_preserves_actionable_reason_without_catalog(self):
         self.caller_check.return_value = {
@@ -350,9 +375,16 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(code, 0)
 
     def test_json_cli_flag_is_forwarded_only_for_check(self):
-        with patch.object(sys, "argv", ["deployment.py", "check", "--json"]), patch.object(deployment, "dispatch", return_value=0) as dispatch:
+        with (
+            patch.object(sys, "argv", ["deployment.py", "check", "--json"]),
+            patch.object(deployment, "dispatch", return_value=0) as dispatch,
+            redirect_stdout(io.StringIO()) as output,
+            redirect_stderr(io.StringIO()) as error,
+        ):
             self.assertEqual(deployment.main(), 0)
             self.assertTrue(dispatch.call_args.args[0].json)
+        self.assertEqual(output.getvalue(), "")
+        self.assertEqual(error.getvalue(), "")
         with patch.object(sys, "argv", ["deployment.py", "start", "--json"]), patch.object(deployment, "dispatch") as dispatch, redirect_stdout(io.StringIO()), patch.object(sys, "stderr", io.StringIO()):
             with self.assertRaises(SystemExit) as error:
                 deployment.main()

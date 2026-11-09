@@ -38,15 +38,26 @@ class DeploymentError(Exception):
     """An actionable operator error whose message contains no setting values."""
 
 
+def progress(message):
+    """Keep operator steps visible without mixing them into command data."""
+    print(f"deployment: {message}", file=sys.stderr, flush=True)
+
+
 def absolute_directory(value, name, *, required=True):
     if not value and not required:
         return None
 
     path = Path(value)
-    if not value or not path.is_absolute() or path.resolve() != path:
-        raise DeploymentError(f"{name}: use an absolute resolved directory path")
-    if not path.is_dir():
-        raise DeploymentError(f"{name}: directory does not exist; inspect the intended host path")
+    try:
+        if not value or not path.is_absolute() or path.resolve() != path:
+            raise DeploymentError(f"{name}: use an absolute resolved directory path")
+        if not path.is_dir():
+            raise DeploymentError(f"{name}: directory does not exist; inspect the intended host path")
+    except OSError as error:
+        raise DeploymentError(
+            f"{name}: cannot inspect directory {path} ({type(error).__name__}); "
+            "check read/search permissions on this directory and its parents before retrying"
+        ) from error
 
     return path
 
@@ -55,8 +66,16 @@ def read_settings(path, *, warning_handler=None):
     """Read literal values without interpreting shell quotes or substitutions."""
     try:
         contents = path.read_text(encoding="utf-8")
+    except UnicodeError as exc:
+        raise DeploymentError(
+            f"Configuration {path} is not valid UTF-8 text; "
+            "save the literal settings file as UTF-8 before retrying"
+        ) from exc
     except OSError as exc:
-        raise DeploymentError("Local configuration cannot be read; run setup or supply --config") from exc
+        raise DeploymentError(
+            f"Cannot read configuration {path} ({type(exc).__name__}); "
+            "run make setup for a new installation, or check this file's path and read permissions"
+        ) from exc
 
     # Console helpers emit safe messages directly; the read-only checker
     # collects them for both its JSON and human reports instead.
@@ -234,20 +253,34 @@ def environment(settings):
 
 
 def run(command, *, cwd, env=None, capture=False):
+    # Only the executable and working directory are safe diagnostic context.
+    # Arguments, captured stderr and environment values may contain secrets.
+    executable = str(command[0])
     try:
         result = subprocess.run(command, cwd=cwd, env=env, text=True,
                                 capture_output=capture, check=False)
     except OSError as exc:
-        raise DeploymentError("Required component helper or Docker command could not be executed") from exc
+        raise DeploymentError(
+            f"Cannot execute {executable} from {cwd} ({type(exc).__name__}); "
+            "check that this directory and executable exist and are accessible, "
+            "and install the documented host prerequisites"
+        ) from exc
     if result.returncode:
-        raise DeploymentError(f"Component command failed with exit status {result.returncode}; inspect its diagnostics")
+        raise DeploymentError(
+            f"{executable} failed with exit status {result.returncode}; "
+            "inspect its preceding diagnostics (captured inspection output is kept private)"
+        )
     return result.stdout if capture else None
 
 
 def helper(settings, component, filename, arguments=(), *, capture=False):
     root = component_root(settings, component)
-    return run([str(root / "scripts" / filename), *arguments], cwd=root,
-               env=environment(settings), capture=capture)
+    script = root / "scripts" / filename
+    progress(f"Delegating to {component} helper: {script}")
+    result = run([str(script), *arguments], cwd=root,
+                 env=environment(settings), capture=capture)
+    progress(f"{component} helper completed: {filename}")
+    return result
 
 
 def setup(destination=None):
@@ -255,22 +288,56 @@ def setup(destination=None):
     paths = [PYFINDER_RUNTIME, PYFINDER_RUNTIME / "pyfinder"]
     paths += [PYFINDER_RUNTIME / "pyfinder" / name
               for name in ("state", "logs", "runs", "playbacks")]
-    for path in paths:
-        if path.is_symlink() or (path.exists() and not path.is_dir()):
-            raise DeploymentError("A required PyFinder runtime directory is a symlink or non-directory; inspect it before setup")
-
     destination = destination if destination is not None else ROOT / "deployment.env"
-    if not destination.parent.is_dir():
-        raise DeploymentError("Local settings parent directory does not exist; create it explicitly before setup")
+    operation = "inspect configuration parent"
+    selected_path = destination
     try:
-        with destination.open("x", encoding="utf-8") as stream:
-            os.chmod(destination, 0o600)
-            stream.write((ROOT / "deployment.env.example").read_text(encoding="utf-8"))
-    except FileExistsError:
-        print("Existing deployment.env preserved.")
-    for path in paths:
-        path.mkdir(exist_ok=True)
-    print("PyFinder directories prepared; no ownership was changed. Review deployment.env before other commands.")
+        for path in paths:
+            operation = "inspect runtime directory"
+            selected_path = path
+            if path.is_symlink() or (path.exists() and not path.is_dir()):
+                raise DeploymentError(
+                    f"Required runtime directory {path} is a symlink or non-directory; "
+                    "inspect its intended location before retrying setup"
+                )
+
+        operation = "inspect configuration parent"
+        selected_path = destination.parent
+        if not destination.parent.is_dir():
+            raise DeploymentError(
+                f"Configuration parent directory {destination.parent} does not exist; "
+                "create the intended directory explicitly before retrying setup"
+            )
+        operation = "create configuration"
+        selected_path = destination
+        try:
+            with destination.open("x", encoding="utf-8") as stream:
+                os.chmod(destination, 0o600)
+                operation = "read configuration template"
+                selected_path = ROOT / "deployment.env.example"
+                template = selected_path.read_text(encoding="utf-8")
+                operation = "write configuration"
+                selected_path = destination
+                stream.write(template)
+        except FileExistsError:
+            print(f"Existing configuration preserved: {destination}")
+
+        for path in paths:
+            operation = "create runtime directory"
+            selected_path = path
+            path.mkdir(exist_ok=True)
+    except OSError as exc:
+        raise DeploymentError(
+            f"Cannot {operation}: {selected_path} ({type(exc).__name__}); "
+            "check permissions and available storage, then retry setup. "
+            "Existing files were preserved; inspect any partially created setup files"
+        ) from exc
+
+    print(f"PyFinder directories prepared at {PYFINDER_RUNTIME / 'pyfinder'}; no ownership was changed.")
+    print(
+        f"Next: review the required paths and service URL in {destination}; "
+        "keep integration disabled until preactivation checks pass."
+    )
 
 
 def get_json(url):
@@ -455,6 +522,7 @@ def dispatch(args):
     if args.action == "setup":
         setup(args.config)
         return
+    progress(f"Reading configuration: {args.config}")
     settings = load_settings(args.config)
     component = args.component
     if args.action in {"build", "data", "finalize", "start", "stop"} and component is None:
@@ -465,27 +533,64 @@ def dispatch(args):
             helper(settings, component, "build-shakemap-docker.sh")
         else:
             root = component_root(settings, component)
+            progress(f"Building pyfinder:dev from {root}; this uses Docker's existing build cache")
             run(["docker", "build", "--platform", "linux/amd64", "--tag", "pyfinder:dev", str(root)], cwd=root)
+        if component == "shakemap":
+            progress(
+                "Next: make data COMPONENT=shakemap DATA_ACTION=inspect; "
+                "review the required assets before provisioning or finalizing"
+            )
+        else:
+            progress(
+                "Next: keep integration disabled and the canonical caller absent for make verify-image; "
+                "see docs/installation-and-operations.md for deliberate dependency refresh"
+            )
     elif args.action == "data":
         if component != "shakemap" or args.data_action is None:
             raise DeploymentError("Data operations require --component shakemap and an explicit --data-action")
         helper(settings, component, "manage-shakemap-data.sh",
                [args.data_action, "--runtime", str(service_runtime(settings))])
+        if args.data_action == "validate":
+            progress(
+                "Next: make finalize COMPONENT=shakemap performs installation verification "
+                "and leaves the ready service running"
+            )
+        elif args.data_action == "stage":
+            progress(
+                "Next: review the staged replacements using the component data guide; "
+                "active assets were not replaced"
+            )
+        else:
+            progress(
+                "Next: review the asset report, provision missing assets if intended, then "
+                "make data COMPONENT=shakemap DATA_ACTION=validate before finalization"
+            )
     elif args.action == "finalize":
         if component != "shakemap":
             raise DeploymentError("Finalization belongs to ShakeMap; use --component shakemap")
         helper(settings, component, "finalize-shakemap.sh", service_arguments(settings))
+        progress(
+            "Next: the ready ShakeMap service is already running; complete the applicable "
+            "preactivation checks in docs/verification.md before caller activation"
+        )
     elif args.action == "start":
         if component == "shakemap":
             helper(settings, component, "start-shakemap-docker.sh", service_arguments(settings))
         else:
             if settings["PYFINDER_SHAKEMAP_ENABLED"] != "true" or not settings["PYFINDER_SHAKEMAP_URL"]:
-                raise DeploymentError("Review and enable the explicit ShakeMap integration settings before continuous deployment startup")
+                raise DeploymentError(
+                    "Complete preactivation image/probe checks and review queue/settings, "
+                    "then enable the explicit ShakeMap integration settings before continuous deployment startup"
+                )
             absolute_directory(str(service_runtime(settings) / "shakemap/data/inputs"), "Shared ShakeMap inputs")
             # The common parent bind already exposes these inputs to the caller.
             # Its component helper retains ownership of image/env compatibility
             # and lifecycle; do not require an invented second mount interface.
             helper(settings, component, "pyfinder", ["continuous"])
+        progress(
+            "Next: make check reports current prerequisites; make verify checks wiring "
+            "once both canonical containers are running"
+        )
     elif args.action == "stop":
         if component == "pyfinder":
             helper(settings, component, "pyfinder", ["stop"])
@@ -494,7 +599,10 @@ def dispatch(args):
     elif args.action == "status":
         run(["docker", "container", "ls", "--all", "--filter", "name=^/(pyfinder-docker|shakemap-docker)$",
              "--format", "{{.Names}}\t{{.Status}}\t{{.Image}}"], cwd=ROOT)
-        print("Container state is not workflow or scientific readiness. Run verify for read-only wiring checks.")
+        print(
+            "Next: make check explains missing prerequisites without changing containers. "
+            "Use make verify for strict wiring checks once both containers are running."
+        )
     elif args.action == "verify":
         if not args.live:
             preflight(settings)
@@ -502,6 +610,10 @@ def dispatch(args):
             helper(settings, component, "verify-shakemap-deployment.sh", service_arguments(settings))
         elif component == "pyfinder":
             helper(settings, component, "verify-pyfinder-image.sh")
+            progress(
+                "Next: with ShakeMap ready, keep integration disabled and the caller absent for "
+                "make verify-caller EVIDENCE=/fresh/absolute/path; see docs/verification.md"
+            )
         else:
             raise DeploymentError("Explicit --live verification requires --component pyfinder or shakemap")
 
@@ -534,13 +646,24 @@ def main():
     if args.data_action and args.action != "data":
         parser.error("--data-action belongs to data only")
     if sys.prefix == sys.base_prefix:
-        parser.error("Activate the existing project virtual environment; do not use system Python")
+        parser.error(
+            f"Activate the existing environment: source {ROOT.parent / '.venv/bin/activate'}; "
+            "do not use system Python"
+        )
+    # The accumulated check owns its human and JSON reports. In particular, a
+    # machine-readable check must not acquire extra banners on either stream.
+    announce = args.action != "check"
+    label = args.action + (f" ({args.component})" if args.component else "")
+    if announce:
+        progress(f"Starting {label}")
     try:
-        return dispatch(args)
+        result = dispatch(args)
     except DeploymentError as exc:
-        print(f"deployment: {exc}", file=sys.stderr)
+        progress(f"{label} failed: {exc}")
         return 1
-    return 0
+    if announce:
+        progress(f"Completed {label}")
+    return result
 
 
 if __name__ == "__main__":
