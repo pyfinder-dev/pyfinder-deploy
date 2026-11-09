@@ -2,5 +2,6 @@
 /runtime/
 /deployment.env
 /.agent/agent-exchange.md
+.DS_Store
 __pycache__/
 *.pyc
